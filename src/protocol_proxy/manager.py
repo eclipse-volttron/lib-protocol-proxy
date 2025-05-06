@@ -4,86 +4,85 @@ import logging
 import os
 import sys
 
-from dataclasses import dataclass
+from gevent.event import AsyncResult
 from gevent.subprocess import Popen, PIPE
 from typing import Type
 from uuid import uuid4, UUID
 from weakref import WeakValueDictionary
 
-from .ipc import IPCConnector, SocketParams, ProtocolHeaders
+from .decorator import callback
+from .headers import ProtocolHeaders
+from .ipc import IPCConnector, ProtocolProxyPeer, SocketParams
 from .proxy import ProtocolProxy
 
+logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
+                    format='%(asctime)s - %(message)s')
 _log = logging.getLogger(__name__)
 
 
-@dataclass
-class ProtocolProxyServer:
-    process: Popen
-    proxy_id: str
-    token: UUID
-    socket_params: SocketParams = None
-
-
-def callback(func):
-    def verify(self, headers: ProtocolHeaders, raw_message: any, async_result=None):
-        print(f'PPM: ATTEMPTING TO VERIFY {headers.sender_id} of type: {type(headers.sender_id)}')
-        print(f'PPM: SELF.PROXIES HAS: {list(self.proxies.keys())}')
-        if proxy := self.proxies.get(headers.sender_id):
-            if headers.sender_token == proxy.token:
-                result = func(self, headers, raw_message)
-                if async_result:
-                    async_result.set(result)
-            else:
-                _log.warning(f'Unable to authenticate caller: {headers.sender_id}')
-        else:
-            _log.warning(f'Request from unknown party: {headers.sender_id}')
-    return verify
-
-
-class ProtocolProxyManager:
+class ProtocolProxyManager(IPCConnector):
     managers = WeakValueDictionary()
 
     def __init__(self, proxy_class: Type[ProtocolProxy]):
+        self.unique_ids = {}
+        super(ProtocolProxyManager, self).__init__(proxy_id=self.get_proxy_id('proxy_manager'), token=uuid4())
         self.proxy_class = proxy_class
-        self.proxies: dict[str, ProtocolProxyServer] = {}
-        self.ipc = IPCConnector(proxy_id=f'proxy_manager', token=uuid4())
-        self.ipc.register_callback(self.handle_registration, 'REGISTER_PROXY')
+        self.register_callback(self.handle_peer_registration, 'REGISTER_PEER', provides_response=True)
 
-    def get_proxy(self, unique_remote_id: tuple) -> ProtocolProxyServer:
-        print("PPM: IN GET PROXY")
-        proxy_id = self.proxy_class.get_proxy_id(unique_remote_id)
-        print(f"PPM: PROXY ID IS: {proxy_id}")
-        if proxy_id not in self.proxies:
-            print(f"PPM: {proxy_id} WAS NOT IN SELF.PROXIES")
-            proxy_process = Popen([sys.executable, '-m', 'protocol_proxy.launch'], stdin=PIPE) #, stdout=PIPE, stderr=PIPE)
+    def wait_peer_ready(self, peer, timeout, func):
+        # TODO:
+        #  - if func, check periodically if a new peer has finished registration.
+        #       - run func once the peer is ready.
+        #  - remove the peer (and logs a warning) if it times out without registering.
+        pass
+
+    def get_proxy_id(self, unique_remote_id: tuple | str) -> UUID:
+        """Lookup or create a UUID for the proxy server
+         given a unique_remote_id and protocol-specific set of parameters."""
+        proxy_id = self.unique_ids.get(unique_remote_id)
+        if not proxy_id:
+            from uuid import uuid4
+            proxy_id = uuid4()
+            self.unique_ids[unique_remote_id] = proxy_id
+        return proxy_id
+
+    def get_proxy(self, unique_remote_id: tuple) -> ProtocolProxyPeer:
+        unique_remote_id = self.proxy_class.get_unique_remote_id(unique_remote_id)
+        proxy_id = self.get_proxy_id(unique_remote_id)
+        proxy_name = str(unique_remote_id)
+        # _log.debug(f'IN MANAGER, GET_PROXY_ID GETS: {proxy_id} for {unique_remote_id}')
+        if proxy_id not in self.peers:
+            module, func = self.proxy_class.__module__, self.proxy_class.__name__
+            proxy_process = Popen(
+                [sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
+                 '--manager-id', self.proxy_id.hex],
+                stdin=PIPE
+            ) #, stdout=PIPE, stderr=PIPE)
             # TODO: Implement logging along lines of AIP.start_agent() (uncomment PIPES above too).
             # TODO: Remove the following commented lines after verifying that new approach works.:
-            #  module, func = self.proxy_class.__module__, self.proxy_class.__name__
             #  proxy_process = Popen([sys.executable, '-c', f'from {module} import {func}; {func}({repr(unique_remote_id)})'])
-            print(f"PPM: CREATED PROXY PROCESS: {proxy_process.pid}")
-            token = uuid4()
-            print(f"PPM: CREATED TOKEN: {token}")
-            proxy_process.stdin.write(token.hex.encode())
+            _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
+            new_peer_token = uuid4()
+            proxy_process.stdin.write(new_peer_token.hex.encode())
+            proxy_process.stdin.write(self.token.hex.encode())
             proxy_process.stdin.flush()
             proxy_process.stdin.close()
             proxy_process.stdin = open(os.devnull)
-            print("PPM: FINISHED WRITING TOKEN")
-            self.proxies[proxy_id] = ProtocolProxyServer(process=proxy_process, proxy_id=proxy_id, token=token)
+            self.peers[proxy_id] = ProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id, token=new_peer_token)
             atexit.register(self.cleanup_proxy_process, proxy_process)
-            print(f"PPM: RETURNING PROXY CONTAINER: {self.proxies[proxy_id]}")
-        return self.proxies[proxy_id]
+        return self.peers[proxy_id]
 
     @callback
-    def handle_registration(self, headers: ProtocolHeaders, raw_message: bytes):
-        print(f"RAW MESSAGE IS: {len(raw_message)} IN LENGTH")
+    def handle_peer_registration(self, headers: ProtocolHeaders, raw_message: bytes):
+        # _log.debug('IN HANDLE_PEER_REGISTRATION')
         message = json.loads(raw_message.decode('utf8'))
-        proxy: ProtocolProxyServer = self.proxies.get(headers.sender_id)
+        proxy: ProtocolProxyPeer = self.peers.get(headers.sender_id)
         if (address := message.get('address')) and (port := message.get('port')):
             proxy.socket_params = SocketParams(address=address, port=port)
-            print(f'PPM: AFTER REGISTRATION, PROXIES IS: {self.proxies}')
-            return True
-        else:
-            return False
+            _log.info(f'PPM: Successfully registered peer: {proxy.proxy_id} @ {proxy.socket_params}')
+            return json.dumps(True).encode('utf8')
+        else:  # TODO: Is there any reasonable situation where this runs and returns false?
+            return json.dumps(False).encode('utf8')
 
     def cleanup_proxy_process(self, process: Popen, timeout: float = 5.0):
         # TODO: Waits may block. Check this and change to a method that yields if needed.
@@ -98,13 +97,10 @@ class ProtocolProxyManager:
 
     @classmethod
     def get_manager(cls, proxy_class: Type[ProtocolProxy]):
-        print('IN GET_MANAGER')
         if proxy_class.__name__ in cls.managers:
-            print('PROXY CLASS FOUND IN MANAGERS.')
             manager = cls.managers[proxy_class.__name__]
         else:
-            print('DID NOT FIND PROXY CLASS IN MANAGERS. CREATING ONE.')
+            _log.info(f'Creating manager for new proxies of class: ({proxy_class.__name__}).')
             manager = cls(proxy_class)
             cls.managers[proxy_class.__name__] = manager
-            print('RETURNING MANAGER')
         return manager
