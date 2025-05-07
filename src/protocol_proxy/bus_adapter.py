@@ -17,10 +17,10 @@ _log = logging.getLogger(__name__)
 class MessageBusAdapter:
     def __init__(self):
         self.ppm = ProtocolProxyManager.get_manager(MQTTProxy)
-        self.ppm.get_proxy(('mqtt','proxy', 1))
         self.ppm.register_callback(self.handle_publish_local, 'PUBLISH_LOCAL')
 
     def run(self):
+        self.ppm.get_proxy(('mqtt','proxy', 1))
         joinall([spawn(self.main_loop), spawn(self.ppm.select_loop),
                  gevent.spawn_later(10, self.subscribe, peer=self.ppm.get_proxy_id(('mqtt', 'proxy', 1)),
                                     topics=['$SYS/#'])])  # TODO: Use PPM.wait_peer_ready once it exists.
