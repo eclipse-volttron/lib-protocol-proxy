@@ -58,6 +58,7 @@ class IPCConnector:
         """ Handles socket communication between ProtocolProxy and ProtocolProxyManager.
          TODO: Mechanism for polling communication with remote (where push is not possible)?
          TODO: Implement encryption.
+         TODO: Asyncio version.
         """
         self.chunk_size: int = chunk_size
         self.encrypt: bool = encrypt
