@@ -1,16 +1,24 @@
 import asyncio
+import logging
+
+from datetime import timedelta
+from typing import Sequence
 
 from bacpypes3.app import Application
-
 from bacpypes3.constructeddata import AnyAtomic
-from bacpypes3.pdu import Address
-from bacpypes3.apdu import ErrorRejectAbortNack
-from bacpypes3.primitivedata import ObjectIdentifier, ObjectType
+from bacpypes3.pdu import Address, PDUData
+from bacpypes3.apdu import (ConfirmedPrivateTransferACK, ConfirmedPrivateTransferError, ConfirmedPrivateTransferRequest,
+                            ErrorRejectAbortNack)
+from bacpypes3.primitivedata import ClosingTag, ObjectIdentifier, ObjectType, OpeningTag, Tag, TagList, Unsigned
 from bacpypes3.vendor import get_vendor_info
 
-from volttron.driver.base.proxy import ProtocolProxy
+#from volttron.driver.base.proxy import ProtocolProxy
+from volttron.client.logs import setup_logging
 
-class BACnetProxy(ProtocolProxy):
+setup_logging()
+_log = logging.getLogger(__name__)
+
+class BACnetProxy: #ProtocolProxy):
     def __init__(self, local_address, bacnet_network=0, vendor_id=999, object_name='Excelsior',
                  device_info_cache=None, router_info_cache=None, ase_id=None):
         # device_object = DeviceObject(objectIdentifier=123, objectName='MyDevice')
@@ -69,8 +77,53 @@ class BACnetProxy(ProtocolProxy):
                 int(property_array_index) if property_array_index is not None else None,
                 int(priority)
             )
-        except ErrorRejectAbortNack as err:
-            print(str(err))
+        except ErrorRejectAbortNack as e:
+            print(str(e))
+
+    async def confirmed_private_transfer(self, address: Address, vendor_id: int, service_number: int,
+                                         service_parameters: TagList = None) -> any:
+        # TODO: Probably need one or more try blocks.
+        # TODO: service_parameters probably needs to already be formatted, but how?
+        cpt_request = ConfirmedPrivateTransferRequest(destination=address,
+                                                      vendorID=vendor_id,
+                                                      serviceNumber=service_number)
+        if service_parameters:
+            cpt_request.serviceParameters = service_parameters
+        response = await self.app.request(cpt_request)
+        if isinstance(response, ConfirmedPrivateTransferError):
+            _log.warning(f'Error calling Confirmed Private Transfer Service: {response}')
+        elif isinstance(response, ConfirmedPrivateTransferACK):
+            return response
+        else:
+            _log.warning(f'Some other Error: {response}')  # TODO: Improve error handling.
+
+    async def send_object_user_lock_time(self, address: Address, device_id: str, object_id: str,
+                                         lock_interval_code: int, lock_interval: int):
+        response = await self.confirmed_private_transfer(address=Address(address), vendor_id=213, service_number=28,
+                                                         service_parameters=TagList([
+                                                             OpeningTag(2),
+                                                             ObjectIdentifier(device_id, _context=0).encode(),
+                                                             ObjectIdentifier(object_id, _context=0).encode(),
+                                                             ObjectUserLockTime(lock_interval_code, lock_interval),
+                                                             ClosingTag(2)
+                                                            ])
+                                                         )
+        return response  # TODO: Improve error handling.
+
+class ObjectUserLockTime(Tag):
+    def __init__(self, interval_code, interval_value, *args):
+        super(ObjectUserLockTime, self).__init__(*args)
+        self.interval_code: int = interval_code
+        self.interval_value: int = interval_value
+
+    def encode(self) -> PDUData:
+        pdu_data = PDUData()
+        pdu_data.put(self.interval_code)
+        pdu_data.put(self.interval_value)
+        return pdu_data
+
+async def create_proxy(address):
+    return BACnetProxy(address)
 
 async def main():
     proxy = BACnetProxy('192.168.1.4/24')
