@@ -4,15 +4,13 @@ import logging
 import os
 import sys
 
-from gevent.event import AsyncResult
 from gevent.subprocess import Popen, PIPE
 from typing import Type
 from uuid import uuid4, UUID
 from weakref import WeakValueDictionary
 
-from .decorator import callback
-from .headers import ProtocolHeaders
-from .ipc import IPCConnector, ProtocolProxyPeer, SocketParams
+from .ipc import callback, ProtocolHeaders, ProtocolProxyPeer, SocketParams
+from .ipc.gevent import GeventIPCConnector
 from .proxy import ProtocolProxy
 
 logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
@@ -20,12 +18,13 @@ logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
 _log = logging.getLogger(__name__)
 
 
-class ProtocolProxyManager(IPCConnector):
+class ProtocolProxyManager(GeventIPCConnector):
     managers = WeakValueDictionary()
 
-    def __init__(self, proxy_class: Type[ProtocolProxy]):
+    def __init__(self, proxy_class: Type[ProtocolProxy], proxy_name: str = 'Manager'):
         self.unique_ids = {}
-        super(ProtocolProxyManager, self).__init__(proxy_id=self.get_proxy_id('proxy_manager'), token=uuid4())
+        super(ProtocolProxyManager, self).__init__(proxy_id=self.get_proxy_id('proxy_manager'), proxy_name=proxy_name,
+                                                   token=uuid4())
         self.proxy_class = proxy_class
         self.register_callback(self.handle_peer_registration, 'REGISTER_PEER', provides_response=True)
 
@@ -46,16 +45,22 @@ class ProtocolProxyManager(IPCConnector):
             self.unique_ids[unique_remote_id] = proxy_id
         return proxy_id
 
-    def get_proxy(self, unique_remote_id: tuple) -> ProtocolProxyPeer:
+    def get_proxy(self, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
+        _log.debug(f'UAI is: {unique_remote_id}')
         unique_remote_id = self.proxy_class.get_unique_remote_id(unique_remote_id)
+        _log.debug(f'UAI is: {unique_remote_id}')
         proxy_id = self.get_proxy_id(unique_remote_id)
         proxy_name = str(unique_remote_id)
         # _log.debug(f'IN MANAGER, GET_PROXY_ID GETS: {proxy_id} for {unique_remote_id}')
         if proxy_id not in self.peers:
             module, func = self.proxy_class.__module__, self.proxy_class.__name__
+            protocol_specific_params = [i for pair in [(f"--{k.replace('_', '-')}", v)
+                                                       for k, v in kwargs.items()] for i in pair]
+            _log.debug([sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
+                 '--manager-id', self.proxy_id.hex, *protocol_specific_params])
             proxy_process = Popen(
                 [sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
-                 '--manager-id', self.proxy_id.hex],
+                 '--manager-id', self.proxy_id.hex, *protocol_specific_params],
                 stdin=PIPE
             ) #, stdout=PIPE, stderr=PIPE)
             # TODO: Implement logging along lines of AIP.start_agent() (uncomment PIPES above too).

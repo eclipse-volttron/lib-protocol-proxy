@@ -3,9 +3,7 @@ import logging
 import gevent
 from gevent import joinall, sleep, spawn
 
-from .decorator import callback
-from .headers import ProtocolHeaders
-from .ipc import ProtocolProxyMessage
+from .ipc import callback, ProtocolHeaders, ProtocolProxyMessage
 from .manager import ProtocolProxyManager
 from .mqtt import MQTTProxy
 

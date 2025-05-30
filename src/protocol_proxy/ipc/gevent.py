@@ -1,115 +1,60 @@
+import json
 import logging
 import struct
 
-from dataclasses import dataclass
 from gevent import select, sleep, spawn
 from gevent.event import AsyncResult
-from gevent.socket import socket, gethostbyname, AF_INET, SOCK_STREAM, SHUT_RDWR
-from gevent.subprocess import Popen
-from itertools import cycle
-from psutil import net_connections
-from typing import NamedTuple, Callable
+from gevent.greenlet import Greenlet
+from gevent.socket import socket, getaddrinfo, AF_INET, SOCK_STREAM, SHUT_RDWR
 from uuid import UUID
 from weakref import WeakKeyDictionary, WeakValueDictionary
 
-from .decorator import callback
-from .headers import HeadersV1, ProtocolHeaders
+from . import callback, IPCConnector, ProtocolHeaders, ProtocolProxyMessage, SocketParams
 
 logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
                     format='%(asctime)s - %(message)s')
 _log = logging.getLogger(__name__)
 
 
-class ProtocolProxyCallback(NamedTuple):
-    method: Callable
-    name: str
-    provides_response: bool
-
-
-@dataclass
-class ProtocolProxyMessage:
-    method_name: str
-    payload: bytes
-    request_id: int = None
-    response_expected: bool = False
-
-
-class SocketParams(NamedTuple):
-    address: str = 'localhost'
-    port: int = 22801
-
-    def __repr__(self):
-        return f'{self.address}:{self.port}'
-
-
-@dataclass
-class ProtocolProxyPeer:
-    proxy_id: UUID
-    token: UUID
-    process: Popen = None
-    socket_params: SocketParams = None
-
-
-class IPCConnector:
-    PROTOCOL_VERSION = {1: HeadersV1}
-
-    def __init__(self, proxy_id, token, proxy_name: str = None, inbound_params: SocketParams = None,
-                 chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899):
-        """ Handles socket communication between ProtocolProxy and ProtocolProxyManager.
-         TODO: Mechanism for polling communication with remote (where push is not possible)?
-         TODO: Implement encryption.
-         TODO: Asyncio version.
-        """
-        self.chunk_size: int = chunk_size
-        self.encrypt: bool = encrypt
-        self.min_port: int = min_port
-        self.max_port: int = max_port
-        self.proxy_id = proxy_id
-        self.proxy_name = proxy_name if proxy_name else str(self.proxy_id)
-        self.token = token
-
-        self.inbound_server_socket: socket = self.setup_inbound_socket(inbound_params)
-
-        self.callbacks: dict[str, ProtocolProxyCallback] = {}
-        self.register_callback(self._handle_response, 'RESPONSE')
-        self.inbounds: set[socket] = {self.inbound_server_socket}   # Sockets from which we expect to read
-        self.outbounds: set[socket] = set()                         # Sockets to which we expect to write
+class GeventIPCConnector(IPCConnector):
+    def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
+                 chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899,
+                 **kwargs):
+        _log.debug(f'GIPCC: In INIT, kwargs is: {kwargs}')
+        self.inbound_server_socket: socket = None
+        super(GeventIPCConnector, self).__init__(proxy_id=proxy_id, token=token, proxy_name=proxy_name,
+                                                 inbound_params=inbound_params, chunk_size=chunk_size, encrypt=encrypt,
+                                                 min_port=min_port, max_port=max_port, **kwargs)
+        self.inbounds: set[socket] = set()      # Sockets from which we expect to read
+        self.outbounds: set[socket] = set()     # Sockets to which we expect to write
         self.outbound_messages: WeakKeyDictionary[socket, ProtocolProxyMessage] = WeakKeyDictionary()
-        self.peers: dict[UUID, ProtocolProxyPeer] = {}
         self.response_results: WeakValueDictionary[int, AsyncResult] = WeakValueDictionary()
-        self.last_request_id = 0
-        self._request_id = cycle(range(1, 65535))
-
         self._stop = False
+        _log.debug('GIPCC: END OF INIT')
 
-    @property
-    def next_request_id(self):
-        return next(self._request_id)
+    def _get_ip_addresses(self, host_name: str) -> set[str]:
+        return {ai[4][0] for ai in getaddrinfo(host_name, None)}
 
-    def stop(self):
-        self._stop = True
-
-    def setup_inbound_socket(self, socket_params: SocketParams = None) -> socket:
+    def _setup_inbound_server(self, socket_params: SocketParams = None):
         inbound_socket: socket = socket(AF_INET, SOCK_STREAM)
         inbound_socket.setblocking(False)
         if socket_params:
             try:
                 inbound_socket.bind(socket_params)
                 inbound_socket.listen(5)  # TODO: The default is "a reasonable value". Should this be left "reasonable"?
-                return inbound_socket
+                self.inbound_server_socket = inbound_socket
+                return
             except (OSError, Exception) as e:
                 _log.warning(f'Unable to bind to provided inbound socket {socket_params}. Trying next available. - {e}')
         else:
             socket_params = SocketParams()
-        used_ports = {nc.laddr.port for nc in net_connections() if nc.laddr.ip == gethostbyname(socket_params.address)}
-        next_port = self.min_port
         while True:
             try:
-                next_port = next(p for p in range(next_port, self.max_port + 1) if p not in used_ports)
+                next_port = next(self.unused_ports(self._get_ip_addresses(socket_params.address)))
                 inbound_socket.bind((socket_params.address, next_port))
                 break
             except OSError:
-                next_port += 1
+                continue
             except StopIteration:
                 _log.error(f'Unable to bind inbound socket to {socket_params.address}'
                            f' on any port in range: {self.min_port} - {self.max_port}.')
@@ -118,13 +63,20 @@ class IPCConnector:
             inbound_socket.listen(5)  # TODO: The default is "a reasonable value". Should this be left "reasonable"?
         except (OSError, Exception) as e:
             _log.warning(f'{self.proxy_name}: Socket error listening on {inbound_socket.getsockname()}: {e}')
-        return inbound_socket
+        self.inbound_server_socket = inbound_socket
+        self.inbounds.add(self.inbound_server_socket)
+        return
 
-    def register_callback(self, callback, method_name, provides_response=False):
-        _log.info(f'{self.proxy_name} registered callback: {method_name}')
-        self.callbacks[method_name] = ProtocolProxyCallback(callback, method_name, provides_response)
+    @callback
+    def _handle_response(self, headers: ProtocolHeaders, raw_message: bytes):
+        result = self.response_results.get(headers.request_id)
+        if not result:
+            _log.warning(f'Received response {headers.request_id} from {headers.sender_id} containing "{raw_message.decode()}",'
+                         f' but result object is no longer available.')
+        else:
+            result.set(raw_message)
 
-    def send(self, remote: SocketParams, message: ProtocolProxyMessage) -> bool | AsyncResult:
+    def send(self, remote: SocketParams, message: ProtocolProxyMessage) -> bool | Greenlet:
         outbound = socket(AF_INET, SOCK_STREAM)
         outbound.setblocking(False)
         try:
@@ -207,7 +159,7 @@ class IPCConnector:
         # _log.debug(f'{self.proxy_name}: IN RECEIVE SOCKET')
         headers = self._receive_headers(s)
         # _log.debug(f'GOT BACK HEADERS: {headers}')
-        if headers is not None and (callback := self.callbacks.get(headers.method_name)):
+        if headers is not None and (cb_info := self.callbacks.get(headers.method_name)):
             remaining = headers.data_length
             buffer = b''
             done = False
@@ -220,14 +172,15 @@ class IPCConnector:
                         remaining -= read_length
                         # TODO: Should we sleep in this loop?
                     #_log.debug(f'CALLBACK IS: {callback}')
-                    if callback.provides_response:
-                        async_result = AsyncResult()
-                        self.outbound_messages[s] = ProtocolProxyMessage(method_name='RESPONSE', payload=async_result,
+                    result = spawn(cb_info.method, self, headers, buffer)
+                    if cb_info.provides_response:
+                    #     async_result = AsyncResult()
+                        self.outbound_messages[s] = ProtocolProxyMessage(method_name='RESPONSE', payload=result,
                                                                          request_id=headers.request_id)
-                        spawn(callback.method, self, headers, buffer, async_result)
+                    #     spawn(cb_info.method, self, headers, buffer, async_result)
                         self.outbounds.add(s)
-                    else:
-                        spawn(callback.method, self, headers, buffer)
+                    # else:
+                    #     spawn(cb_info.method, self, headers, buffer)
                 except BlockingIOError as e:
                     _log.info(f'BlockingIOError: {e}')
                     sleep(0.1)
@@ -236,7 +189,7 @@ class IPCConnector:
                     s.close()
                     done = True
                 else:
-                    if not callback.provides_response:
+                    if not cb_info.provides_response:
                         s.shutdown(SHUT_RDWR)
                         s.close()
                     done = True
@@ -265,11 +218,12 @@ class IPCConnector:
             # if isinstance(message.payload, AsyncResult):
                 #_log.debug(f"PAYLOAD IS READY: {message.payload.ready()}")
             # _log.debug(f'{self.proxy_name}: IN SEND SOCKET message is: {message}')
-            payload = message.payload.get() if isinstance(message.payload, AsyncResult) else message.payload
+            payload = message.payload.get() if isinstance(message.payload, Greenlet) else message.payload
             #if isinstance(message.payload, AsyncResult):
                 #_log.debug(f'{self.proxy_name}: IN SEND SOCKET, payload {id(message.payload)} is a {type(message.payload)} containing: {message.payload.get()}, payload is: {payload}')
             self._send_headers(s, len(payload), message.request_id, message.response_expected, message.method_name)
             try:
+                _log.debug('REACHED SENDALL IN GEVENT IPC SEND')
                 s.sendall(payload)  # TODO: Should we send in chunks and sleep in between?
                 if message.response_expected:
                     self.inbounds.add(s)
@@ -298,11 +252,10 @@ class IPCConnector:
             self.outbounds.discard(s)
             s.close()
 
-    @callback
-    def _handle_response(self, headers: ProtocolHeaders, raw_message: bytes):
-        result = self.response_results.get(headers.request_id)
-        if not result:
-            _log.warning(f'Received response {headers.request_id} from {headers.sender_id} containing "{raw_message.decode()}",'
-                         f' but result object is no longer available.')
-        else:
-            result.set(raw_message)
+    def start(self, *_, **__):
+        self._setup_inbound_server(self.inbound_params)
+        _log.debug(f'{self.proxy_name} STARTED.')
+
+    def stop(self):
+        self._stop = True
+

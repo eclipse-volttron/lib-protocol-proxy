@@ -12,9 +12,10 @@ from .launch import launch
 #### Dummy Proxy for testing.
 class ConcreteProxy(ProtocolProxy):
     def __init__(self, manager_address: str, manager_port: int, manager_token: UUID, token: UUID,
-                 unique_remote_id: tuple, *args, **kwargs):
-        super(ConcreteProxy, self).__init__(manager_address, manager_port, manager_token, token, unique_remote_id,
-                                            *args, **kwargs)
+                 unique_remote_id: tuple, **kwargs):
+        super(ConcreteProxy, self).__init__(manager_address=manager_address, manager_port=manager_port,
+                                            manager_token=manager_token, token=token, unique_remote_id=unique_remote_id,
+                                            **kwargs)
         joinall([spawn(self.main_loop), spawn(self.select_loop)])
 
 

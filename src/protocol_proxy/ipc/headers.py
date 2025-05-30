@@ -2,7 +2,6 @@ import abc
 import logging
 import struct
 
-from ast import literal_eval
 from uuid import UUID
 
 logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,

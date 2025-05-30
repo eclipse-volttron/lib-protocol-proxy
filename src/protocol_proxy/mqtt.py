@@ -11,25 +11,24 @@ from gevent import joinall, sleep, spawn
 from typing import Type
 from uuid import UUID
 
-from .decorator import callback
-from .headers import ProtocolHeaders
-from .ipc import ProtocolProxyMessage
-from .launch import launch
-from .proxy import ProtocolProxy
+from .ipc import callback, ProtocolHeaders, ProtocolProxyMessage
+from .proxy import launch
+from .proxy.gevent import GeventProtocolProxy
 
 logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
                     format='%(asctime)s - %(message)s')
 _log = logging.getLogger(__name__)
 
 
-class MQTTProxy(ProtocolProxy):
+class MQTTProxy(GeventProtocolProxy):
     def __init__(self, manager_address, manager_port, manager_id: UUID, manager_token: UUID, token: UUID, proxy_id: UUID,
                  host: str, port: int = 1883, keepalive: int = 60, bind_address: str = '',
-                 bind_port: int = 0, *args, **kwargs):
-        # _log.debug(f'IN MQTT PROXY, BEFORE SUPER')
-        super(MQTTProxy, self).__init__(manager_address, manager_port, manager_id, manager_token, token, proxy_id,
-                                        *args, **kwargs)
-        # _log.debug(f'{self.proxy_name} IN MQTT PROXY AFTER SUPER')
+                 bind_port: int = 0, **kwargs):
+        _log.debug(f'IN MQTT PROXY, BEFORE SUPER')
+        super(MQTTProxy, self).__init__(manager_address=manager_address, manager_port=manager_port,
+                                        manager_id=manager_id, manager_token=manager_token,
+                                        token=token, proxy_id=proxy_id, **kwargs)
+        _log.debug(f'{self.proxy_name} IN MQTT PROXY AFTER SUPER')
         self.subscribed_topics: list[tuple[str, int]] = []  # Use [("$SYS/#", 0)] to test MQTT communication.
 
         self.register_callback(self.handle_publish_remote, 'PUBLISH_REMOTE')
@@ -38,7 +37,7 @@ class MQTTProxy(ProtocolProxy):
         self.mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.mqtt.on_connect = self.on_connect
         self.mqtt.on_message = self.on_message
-        try:
+        try:  # TODO: Proxy registration fails if the MQTT connection takes too long or fails. Fix this.
             _log.debug(
                 f'MQTTProxy {self.proxy_name}: GOING TO RUN -- "mqtt.connect({host}, {port}, {keepalive}, {bind_address}, {bind_port})')
             success = self.mqtt.connect(host=host, port=port, keepalive=keepalive,
@@ -93,7 +92,7 @@ class MQTTProxy(ProtocolProxy):
         self.mqtt.subscribe(self.subscribed_topics)
 
 
-def launch_mqtt(parser: ArgumentParser) -> (ArgumentParser, Type[ProtocolProxy]):
+def launch_mqtt(parser: ArgumentParser) -> (ArgumentParser, Type[GeventProtocolProxy]):
     # _log.debug(f'IN LAUNCH MQTT')
     parser.add_argument('--host', type=str, default='test.mosquitto.org',
                                  help='Address of the MQTT broker.')
@@ -101,11 +100,11 @@ def launch_mqtt(parser: ArgumentParser) -> (ArgumentParser, Type[ProtocolProxy])
                                  help='Port of the MQTT broker.')
     parser.add_argument('--keepalive', type=int, default=60,
                                  help='Thing to print for testing.')
-    parser.add_argument('--bind_address', type=str, default='',
+    parser.add_argument('--bind-address', type=str, default='',
                                  help='Maximum period in seconds between communications with the broker.'
                                       ' If no other messages are being exchanged, this controls the rate'
                                       ' at which the client will send ping messages to the broker.')
-    parser.add_argument('--bind_port', type=int, default=0)
+    parser.add_argument('--bind-port', type=int, default=0)
     # TODO: This can be bool or Literal, but argparse objects to that.
     # parser_concrete.add_argument('--clean_start', type=int, default=3,
     #                              help='Sets the MQTT v5.0 clean_start flag always, never or on the first'
