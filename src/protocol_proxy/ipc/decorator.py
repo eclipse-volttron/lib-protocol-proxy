@@ -11,7 +11,6 @@ _log = logging.getLogger(__name__)
 # TODO: Did this work with the AsyncResult removed (just returns, possibly within greenlet)?
 def callback(func):
     def verify(self, ipc, headers, raw_message: any):
-        #_log.debug(f'CALLBACK: ATTEMPTING TO VERIFY {headers.sender_id} AGAINST PEERS: {list(ipc.peers.keys())}')
         if peer := ipc.peers.get(headers.sender_id):
             if headers.sender_token == peer.token:
                 return func(self, headers, raw_message)

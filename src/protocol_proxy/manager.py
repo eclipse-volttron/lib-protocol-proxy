@@ -57,10 +57,12 @@ class ProtocolProxyManager(GeventIPCConnector):
             protocol_specific_params = [i for pair in [(f"--{k.replace('_', '-')}", v)
                                                        for k, v in kwargs.items()] for i in pair]
             _log.debug([sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
-                 '--manager-id', self.proxy_id.hex, *protocol_specific_params])
+                        '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,
+                        '--manager-port', str(self.inbound_params.port), *protocol_specific_params])
             proxy_process = Popen(
                 [sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
-                 '--manager-id', self.proxy_id.hex, *protocol_specific_params],
+                 '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,
+                        '--manager-port', str(self.inbound_params.port), *protocol_specific_params],
                 stdin=PIPE
             ) #, stdout=PIPE, stderr=PIPE)
             # TODO: Implement logging along lines of AIP.start_agent() (uncomment PIPES above too).

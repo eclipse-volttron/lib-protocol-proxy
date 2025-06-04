@@ -5,7 +5,6 @@ from asyncio import iscoroutinefunction, run
 from typing import Callable
 from uuid import UUID
 
-
 def proxy_command_parser(parser: ArgumentParser = None):
     parser = parser if parser else ArgumentParser()
     parser.add_argument('--proxy-id', type=UUID, required=True)

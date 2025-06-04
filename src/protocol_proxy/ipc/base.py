@@ -56,7 +56,6 @@ class IPCConnector:
          TODO: Mechanism for polling communication with remote (where push is not possible)?
          TODO: Implement encryption.
         """
-        _log.debug('IPCC: In INIT')
         self.chunk_size: int = chunk_size
         self.encrypt: bool = encrypt
         self.inbound_params = inbound_params
@@ -70,7 +69,6 @@ class IPCConnector:
         self.peers: dict[UUID, ProtocolProxyPeer] = {}
         self.register_callback(self._handle_response, 'RESPONSE')
         self._request_id = cycle(range(1, 65535))
-        _log.debug('IPCC: END OF INIT')
 
     @abc.abstractmethod
     def _get_ip_addresses(self, host_name: str) -> set[str]:
