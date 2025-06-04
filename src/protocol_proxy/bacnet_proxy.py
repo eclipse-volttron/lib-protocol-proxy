@@ -53,21 +53,46 @@ class BACnetProxy(AsyncioProtocolProxy):
     async def query_device_endpoint(self, _, raw_message: bytes):
         """Endpoint for querying a device."""
         message = json.loads(raw_message.decode('utf8'))
+        _log.debug(f"query_device_endpoint received message: {message}")
         address = message['address']
         property_name = message.get('property_name', 'object-identifier')
+        _log.debug(f"Calling self.bacnet.query_device with address={address}, property_name={property_name}")
         result = await self.bacnet.query_device(address, property_name)
+        _log.debug(f"query_device_endpoint result: {result}")
         return json.dumps(result).encode('utf8')
 
     @callback
     async def read_property_endpoint(self, _, raw_message: bytes):
         """Endpoint for reading a property from a BACnet device."""
         message = json.loads(raw_message.decode('utf8'))
+        _log.debug(f"read_property_endpoint received message: {message}")
         address = message['device_address']
         object_identifier = message['object_identifier']
         property_identifier = message['property_identifier']
         property_array_index = message.get('property_array_index', None)
-        result =await self.bacnet.read_property(address, object_identifier, property_identifier, property_array_index)
-        return json.dumps(result).encode('utf8')
+        _log.debug(f"Calling self.bacnet.read_property with address={address}, object_identifier={object_identifier}, property_identifier={property_identifier}, property_array_index={property_array_index}")
+        result = await self.bacnet.read_property(address, object_identifier, property_identifier, property_array_index)
+        _log.debug(f"read_property_endpoint result: {result}")
+        # Handle non-JSON-serializable BACnet error/abort responses
+        try:
+            # Check for known BACnet error/abort types
+            from bacpypes3.apdu import ErrorRejectAbortNack
+            if isinstance(result, ErrorRejectAbortNack):
+                error_response = {
+                    "error": type(result).__name__,
+                    "details": str(result)
+                }
+                return json.dumps(error_response).encode('utf8')
+            # If result is not serializable, catch and return error
+            return json.dumps(result).encode('utf8')
+        except TypeError as e:
+            error_response = {
+                "error": "SerializationError",
+                "details": str(e),
+                "raw_type": str(type(result)),
+                "raw_str": str(result)
+            }
+            return json.dumps(error_response).encode('utf8')
 
     @callback
     async def send_object_user_lock_time_endpoint(self, _, raw_message: bytes):
@@ -123,31 +148,27 @@ class BACnet:
         )
 
     async def query_device(self, address: str, property_name: str = 'object-identifier'):
-        """Returns properties about the device at the given address.
-            If a different property name is not given, this will be the object-id.
-            This function allows unicast discovery.
-            This can get everything from device if it is using read_property_multiple and ALL
-        """
+        _log.debug(f"BACnet.query_device called with address={address}, property_name={property_name}")
         return await self.read_property(device_address=address, object_identifier='device:4194303',
                                         property_identifier=property_name)
 
     async def read_property(self, device_address: str, object_identifier: str, property_identifier: str,
                    property_array_index: int | None = None):
-        # TODO: How to handle timeout (what if target is not there)?
         try:
-            _log.debug(f'Reading property {property_identifier} from {object_identifier} at {device_address}')
+            _log.debug(f"BACnet.read_property called with device_address={device_address}, object_identifier={object_identifier}, property_identifier={property_identifier}, property_array_index={property_array_index}")
             response = await self.app.read_property(
                 Address(device_address),
                 ObjectIdentifier(object_identifier),
                 property_identifier,
                 int(property_array_index) if property_array_index is not None else None
             )
+            _log.debug(f"BACnet.read_property response: {response}")
         except ErrorRejectAbortNack as err:
             _log.debug(f'Error reading property {err}')
             response = err
         if isinstance(response, AnyAtomic):
             response = response.get_value()
-        # _log.debug(f'Response from read_property: {response}')
+        _log.debug(f"BACnet.read_property final response: {response}")
         return response
 
     async def write_property(self, device_address: str, object_identifier: str, property_identifier: str, value: any,

@@ -162,8 +162,9 @@ class IPCProtocol(BufferedProtocol):
 
     async def _run_callback(self, callback_info: ProtocolProxyCallback, headers, data):
         try:
-            async with asyncio.timeout(55):  # TODO: Need configurable timeout. Also, asyncio.timeout was introduced in Python 11....
-                result = await callback_info.method(self.connector, headers, data.tobytes())
+            # Python 3.10 compatibility: use asyncio.wait_for instead of asyncio.timeout
+            coro = callback_info.method(self.connector, headers, data.tobytes())
+            result = await asyncio.wait_for(coro, timeout=55)
         except asyncio.TimeoutError as e:
             _log.warning(f'{self.connector.proxy_name} -- Callback {headers.method_name} timed out: {e}')
             result = b'FOO'  # TODO: This is a testing stub.  Should probably close socket and return instead.
@@ -173,6 +174,7 @@ class IPCProtocol(BufferedProtocol):
             self.transport.close()
 
     def connection_made(self, transport: Transport):
+        _log.debug(f"[IPCProtocol] connection_made: transport={transport}")
         try:
             self.transport = transport
             if self.outgoing_message:
