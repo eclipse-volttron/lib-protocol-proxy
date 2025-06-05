@@ -39,7 +39,7 @@ class AsyncioBACnetManager:
                             response_expected=True
                          ))
             if result:
-                result = json.loads((await result).decode('utf8'))
+                result = json.loads(result.decode('utf8'))
                 device_id = ObjectIdentifier(tuple(result))
 
                 _log.debug(f'BACMan: The remote device has ID: {device_id}\n')
@@ -56,5 +56,5 @@ class AsyncioBACnetManager:
                                       )
                                     )
                 _log.debug('The object list is: ')
-                _log.debug([ObjectIdentifier(tuple(r)) for r in json.loads((await result2).decode('utf8'))])
+                _log.debug([ObjectIdentifier(tuple(r)) for r in json.loads(result2.decode('utf8'))])
                 _log.debug('\n\n')
