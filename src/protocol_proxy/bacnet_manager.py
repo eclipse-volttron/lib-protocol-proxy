@@ -4,9 +4,9 @@ import logging
 
 from bacpypes3.primitivedata import ObjectIdentifier, ObjectType
 
-from .ipc import ProtocolProxyMessage
 from protocol_proxy.manager_asyncio import AsyncioProtocolProxyManager
 from .bacnet_proxy import BACnetProxy
+from protocol_proxy.ipc import ProtocolProxyMessage
 
 logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
                     format='%(asctime)s - %(message)s')
@@ -38,13 +38,19 @@ class AsyncioBACnetManager:
                              payload=json.dumps({'address': '130.20.24.157'}).encode('utf8'),
                             response_expected=True
                          ))
-            if result:
+            if isinstance(result, asyncio.Future):
+                result = await result
+            if isinstance(result, bytes):
                 result = json.loads(result.decode('utf8'))
-                device_id = ObjectIdentifier(tuple(result))
+            elif isinstance(result, str):
+                result = json.loads(result)
+            elif result is None:
+                continue
+            else:
+                continue
+            device_id = ObjectIdentifier(tuple(result))
 
-                _log.debug(f'BACMan: The remote device has ID: {device_id}\n')
-
-                result2 = await self.ppm.send(peer.socket_params,
+            result2 = await self.ppm.send(peer.socket_params,
                                       ProtocolProxyMessage(
                                           method_name='READ_PROPERTY',
                                           payload=json.dumps({
@@ -55,6 +61,13 @@ class AsyncioBACnetManager:
                                           response_expected=True
                                       )
                                     )
-                _log.debug('The object list is: ')
-                _log.debug([ObjectIdentifier(tuple(r)) for r in json.loads(result2.decode('utf8'))])
-                _log.debug('\n\n')
+            if isinstance(result2, asyncio.Future):
+                result2 = await result2
+            if isinstance(result2, bytes):
+                obj_list = json.loads(result2.decode('utf8'))
+            elif isinstance(result2, str):
+                obj_list = json.loads(result2)
+            elif result2 is None:
+                continue
+            else:
+                continue

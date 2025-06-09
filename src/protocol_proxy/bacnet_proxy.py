@@ -17,7 +17,7 @@ from bacpypes3.vendor import get_vendor_info
 
 from .ipc.decorator import callback
 from .proxy import launch
-from .proxy.asyncio import AsyncioProtocolProxy
+from .proxy.asyncio import AsyncioIPCConnector, AsyncioProtocolProxy
 
 logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
                     format='%(asctime)s - %(message)s')
@@ -36,6 +36,9 @@ class BACnetProxy(AsyncioProtocolProxy):
         self.register_callback(self.read_property_endpoint, 'READ_PROPERTY', provides_response=True)
         self.register_callback(self.send_object_user_lock_time_endpoint, 'SEND_OBJECT_USER_LOCK_TIME', provides_response=True)
         self.register_callback(self.write_property_endpoint, 'WRITE_PROPERTY', provides_response=True)
+        self.register_callback(self.read_device_all_endpoint, 'READ_DEVICE_ALL', provides_response=True)
+        self.register_callback(self.who_is_endpoint, 'WHO_IS', provides_response=True)
+        self.register_callback(self.scan_ip_range_endpoint, 'SCAN_IP_RANGE', provides_response=True)
 
     @callback
     async def confirmed_private_transfer_endpoint(self, _, raw_message: bytes):
@@ -53,12 +56,9 @@ class BACnetProxy(AsyncioProtocolProxy):
     async def query_device_endpoint(self, _, raw_message: bytes):
         """Endpoint for querying a device."""
         message = json.loads(raw_message.decode('utf8'))
-        _log.debug(f"query_device_endpoint received message: {message}")
         address = message['address']
         property_name = message.get('property_name', 'object-identifier')
-        _log.debug(f"Calling self.bacnet.query_device with address={address}, property_name={property_name}")
         result = await self.bacnet.query_device(address, property_name)
-        _log.debug(f"query_device_endpoint result: {result}")
         # Handle non-JSON-serializable BACnet error/abort responses
         try:
             from bacpypes3.apdu import ErrorRejectAbortNack
@@ -82,17 +82,28 @@ class BACnetProxy(AsyncioProtocolProxy):
     async def read_property_endpoint(self, _, raw_message: bytes):
         """Endpoint for reading a property from a BACnet device."""
         message = json.loads(raw_message.decode('utf8'))
-        _log.debug(f"read_property_endpoint received message: {message}")
         address = message['device_address']
         object_identifier = message['object_identifier']
         property_identifier = message['property_identifier']
         property_array_index = message.get('property_array_index', None)
-        _log.debug(f"Calling self.bacnet.read_property with address={address}, object_identifier={object_identifier}, property_identifier={property_identifier}, property_array_index={property_array_index}")
         result = await self.bacnet.read_property(address, object_identifier, property_identifier, property_array_index)
-        _log.debug(f"read_property_endpoint result: {result}")
-        # Handle non-JSON-serializable BACnet error/abort responses
+        def make_jsonable(val):
+            if isinstance(val, (list, tuple)):
+                return [make_jsonable(v) for v in val]
+            if isinstance(val, (bytes, bytearray)):
+                return val.hex()
+            if hasattr(val, 'as_tuple'):
+                return str(val)
+            if hasattr(val, '__dict__') and not isinstance(val, type):
+                return {k: make_jsonable(v) for k, v in val.__dict__.items()}
+            if hasattr(val, '__class__') and 'Error' in val.__class__.__name__:
+                return str(val)
+            import ipaddress
+            if isinstance(val, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+                return str(val)
+            return val
+        jsonable_result = make_jsonable(result)
         try:
-            # Check for known BACnet error/abort types
             from bacpypes3.apdu import ErrorRejectAbortNack
             if isinstance(result, ErrorRejectAbortNack):
                 error_response = {
@@ -100,8 +111,7 @@ class BACnetProxy(AsyncioProtocolProxy):
                     "details": str(result)
                 }
                 return json.dumps(error_response).encode('utf8')
-            # If result is not serializable, catch and return error
-            return json.dumps(result).encode('utf8')
+            return json.dumps(jsonable_result).encode('utf8')
         except TypeError as e:
             error_response = {
                 "error": "SerializationError",
@@ -136,6 +146,61 @@ class BACnetProxy(AsyncioProtocolProxy):
                                             property_array_index)
         return json.dumps(result).encode('utf8')
 
+    @callback
+    async def read_device_all_endpoint(self, _, raw_message: bytes):
+        """Endpoint for reading all properties from a BACnet device."""
+        import traceback
+        try:
+            message = json.loads(raw_message.decode('utf8'))
+            device_address = message['device_address']
+            device_object_identifier = message['device_object_identifier']
+            result = await self.read_device_all(device_address, device_object_identifier)
+            if not result:
+                return json.dumps({"error": "No data returned from read_device_all"}).encode('utf8')
+            def make_jsonable(val):
+                if isinstance(val, (str, int, float, bool)):
+                    return val
+                if isinstance(val, (list, tuple, set)):
+                    return [make_jsonable(v) for v in val]
+                if isinstance(val, (bytes, bytearray)):
+                    return val.hex()
+                if hasattr(val, '__dict__') and not isinstance(val, type):
+                    return {str(k): make_jsonable(v) for k, v in val.__dict__.items()}
+                import ipaddress
+                if isinstance(val, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+                    return str(val)
+                # TODO: Replace this forced string conversion with proper BACnet object serialization
+                return f"FORCED:{str(val)}"
+            jsonable_result = {str(k): make_jsonable(v) for k, v in result.items()}
+            return json.dumps(jsonable_result).encode('utf8')
+        except Exception as e:
+            tb = traceback.format_exc()
+            return json.dumps({"error": str(e), "traceback": tb}).encode('utf8')
+
+    @callback
+    async def who_is_endpoint(self, _, raw_message: bytes):
+        """Endpoint for sending a Who-Is request."""
+        message = json.loads(raw_message.decode('utf8'))
+        device_instance_low = message['device_instance_low']
+        device_instance_high = message['device_instance_high']
+        dest = message['dest']
+        result = await self.who_is(device_instance_low, device_instance_high, dest)
+        try:
+            return json.dumps(result).encode('utf8')
+        except TypeError as e:
+            return json.dumps({"error": "SerializationError", "details": str(e), "raw_type": str(type(result)), "raw_str": str(result)}).encode('utf8')
+
+    @callback
+    async def scan_ip_range_endpoint(self, _, raw_message: bytes):
+        """Endpoint for scanning an IP range for BACnet devices."""
+        message = json.loads(raw_message.decode('utf8'))
+        network_str = message['network_str']
+        result = await self.scan_ip_range(network_str)
+        try:
+            return json.dumps(result).encode('utf8')
+        except TypeError as e:
+            return json.dumps({"error": "SerializationError", "details": str(e), "raw_type": str(type(result)), "raw_str": str(result)}).encode('utf8')
+
     async def scan_ip_range(self, network_str: str) -> list:
         import ipaddress
         net = ipaddress.ip_network(network_str, strict=False)
@@ -169,6 +234,9 @@ class BACnetProxy(AsyncioProtocolProxy):
 
     async def read_device_all(self, device_address: str, device_object_identifier: str) -> dict:
         from bacpypes3.primitivedata import ObjectIdentifier
+        from bacpypes3.basetypes import PropertyReference
+        from bacpypes3.lib.batchread import BatchRead, DeviceAddressObjectPropertyReference
+
         properties = [
             "object-identifier",
             "object-name",
@@ -244,13 +312,29 @@ class BACnetProxy(AsyncioProtocolProxy):
             "profile-name",
         ]
         device_obj = ObjectIdentifier(device_object_identifier)
-        parameter_list = [device_obj, properties]
+        daopr_list = [
+            DeviceAddressObjectPropertyReference(
+                key=prop,
+                device_address=device_address,
+                object_identifier=device_obj,
+                property_reference=PropertyReference(prop)
+            ) for prop in properties
+        ]
+        results = {}
+        import logging
+        def callback(key, value):
+            logging.getLogger(__name__).debug(f"BatchRead callback: key={key}, value={value}")
+            results[key] = value
+        batch = BatchRead(daopr_list)
         try:
-            result = await self.app.read_property_multiple(Address(device_address), parameter_list)
-            return result
+            await asyncio.wait_for(batch.run(self.bacnet.app, callback=callback), timeout=30)
+        except asyncio.TimeoutError:
+            logging.getLogger(__name__).error("BatchRead timed out after 30 seconds!")
+            results['error'] = 'Timeout waiting for BACnet device response.'
         except Exception as e:
-            print("Error reading all properties: %s", e)
-            return {}
+            logging.getLogger(__name__).exception(f"Exception in BatchRead: {e}")
+            results['error'] = str(e)
+        return results
 
     async def who_is(self, device_instance_low, device_instance_high, dest):
         from bacpypes3.pdu import Address
@@ -401,7 +485,7 @@ async def run_proxy(local_device_address, **kwargs):
     await bp.start()
 
 
-def launch_bacnet(parser: ArgumentParser) -> (ArgumentParser, Type[AsyncioProtocolProxy]):
+def launch_bacnet(parser: ArgumentParser) -> tuple[ArgumentParser, Type[AsyncioProtocolProxy]]:
     parser.add_argument('--local-device-address', type=str, required=True,
                         help='Address on the local machine of this BACnet Proxy.')
     parser.add_argument('--bacnet-network', type=int, default=0,
