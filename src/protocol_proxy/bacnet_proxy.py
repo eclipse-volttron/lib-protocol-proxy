@@ -2,16 +2,18 @@ import asyncio
 import json
 import logging
 import sys
+from typing import Optional, Type # Added Type
 
-from argparse import ArgumentParser
-from math import floor
-from typing import Type
+from argparse import ArgumentParser # Added
+from math import floor # Added
 
 from bacpypes3.app import Application
 from bacpypes3.constructeddata import AnyAtomic
 from bacpypes3.pdu import Address, PDUData
-from bacpypes3.apdu import (ConfirmedPrivateTransferACK, ConfirmedPrivateTransferError, ConfirmedPrivateTransferRequest,
-                            ErrorRejectAbortNack)
+from bacpypes3.apdu import (
+    ConfirmedPrivateTransferACK, ConfirmedPrivateTransferError, ConfirmedPrivateTransferRequest,
+    ErrorRejectAbortNack
+)
 from bacpypes3.primitivedata import ClosingTag, Null, ObjectIdentifier, ObjectType, OpeningTag, Tag, TagList
 from bacpypes3.vendor import get_vendor_info
 
@@ -20,14 +22,18 @@ from .proxy import launch
 from .proxy.asyncio import AsyncioIPCConnector, AsyncioProtocolProxy
 
 logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
-                    format='%(asctime)s - %(message)s')
+                    format='%(asctime)s - %(levelname)s - %(name)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s')
 _log = logging.getLogger(__name__)
 
+# Forward declaration for type hinting if BACnet class is defined later in the file
+# class BACnet:
+#     pass 
 
 class BACnetProxy(AsyncioProtocolProxy):
     def __init__(self, local_device_address, bacnet_network=0, vendor_id=999, object_name='VOLTTRON BACnet Proxy',
                  **kwargs):
         super(BACnetProxy, self).__init__(**kwargs)
+        # Ensure BACnet class is defined before this or properly imported
         self.bacnet = BACnet(local_device_address, bacnet_network, vendor_id, object_name, **kwargs)
         self.loop = asyncio.get_event_loop()
 
@@ -195,42 +201,105 @@ class BACnetProxy(AsyncioProtocolProxy):
         """Endpoint for scanning an IP range for BACnet devices."""
         message = json.loads(raw_message.decode('utf8'))
         network_str = message['network_str']
-        result = await self.scan_ip_range(network_str)
+        _log.debug(f"scan_ip_range_endpoint called with network_str: {network_str}")
+        result = await self.scan_ip_range(network_str) # Using default timeout for now
         try:
             return json.dumps(result).encode('utf8')
         except TypeError as e:
-            return json.dumps({"error": "SerializationError", "details": str(e), "raw_type": str(type(result)), "raw_str": str(result)}).encode('utf8')
+            _log.error(f"SerializationError in scan_ip_range_endpoint: {e}, result was: {result}", exc_info=True)
+            return json.dumps({{"error": "SerializationError", "details": str(e), "raw_type": str(type(result)), "raw_str": str(result)}}).encode('utf8')
 
-    async def scan_ip_range(self, network_str: str) -> list:
-        import ipaddress
-        net = ipaddress.ip_network(network_str, strict=False)
+    async def scan_ip_range(self, network_str: str, whois_timeout: float = 3.0) -> list:
+        import ipaddress # Moved import inside for clarity, though module level is also fine
+        _log.info(f"Starting IP range scan for network: {network_str} with Who-Is timeout: {whois_timeout}s")
+        try:
+            net = ipaddress.ip_network(network_str, strict=False)
+        except ValueError as e:
+            _log.error(f"Invalid network string provided to scan_ip_range: {network_str} - {e}")
+            return [{{"error": "InvalidNetworkString", "details": str(e)}}]
+            
         tasks = []
-        semaphore = asyncio.Semaphore(20)  # limit concurrency to 20 tasks concurrently
+        semaphore = asyncio.Semaphore(20)
 
-        async def scan_host(ip):
+        async def scan_host(ip_obj):
+            ip_str = str(ip_obj)
             async with semaphore:
-                # Use a directed scan on the full BACnet range for each host.
-                results = await self.who_is(0, 4194303, str(ip))
-                # Return tuple of (ip, results) so we know which IP had the device
-                return (str(ip), results)
+                _log.debug(f"Scanning host: {ip_str} with Who-Is timeout: {whois_timeout}s")
+                i_am_responses = [] # Initialize to ensure it's defined
+                try:
+                    i_am_responses = await self.who_is(0, 4194303, ip_str, apdu_timeout=whois_timeout)
+                except Exception as e:
+                    _log.error(f"Exception calling self.who_is for {ip_str}: {e}", exc_info=True)
+                    # i_am_responses remains empty or as set before error
+                
+                _log.debug(f"Who-Is responses for {ip_str}: {i_am_responses}")
+                found_devices_on_host = []
+                if i_am_responses:
+                    for device_data in i_am_responses:
+                        try:
+                            device_id_tuple = device_data.get('deviceIdentifier')
+                            target_ip_for_read = ip_str
 
-        for ip in net.hosts():
-            tasks.append(asyncio.create_task(scan_host(ip)))
+                            if device_id_tuple and isinstance(device_id_tuple, (list, tuple)) and len(device_id_tuple) == 2:
+                                device_instance = device_id_tuple[1]
+                                obj_id_str = f"device,{device_instance}"
+                                _log.debug(f"Attempting to read object-name for {obj_id_str} at {target_ip_for_read}")
+                                try:
+                                    obj_name = await asyncio.wait_for(
+                                        self.bacnet.read_property(target_ip_for_read, obj_id_str, "object-name"),
+                                        timeout=5.0 
+                                    )
+                                    device_data['object-name'] = obj_name
+                                    _log.debug(f"Successfully read object-name for {obj_id_str} at {target_ip_for_read}: {obj_name}")
+                                except asyncio.TimeoutError:
+                                    _log.warning(f"Timeout reading object-name for {obj_id_str} at {target_ip_for_read}")
+                                    device_data['object-name'] = "Error: Timeout reading object-name"
+                                except ErrorRejectAbortNack as e_bacnet:
+                                    _log.warning(f"BACnet error reading object-name for {obj_id_str} at {target_ip_for_read}: {e_bacnet}")
+                                    device_data['object-name'] = f"Error: BACnet error ({type(e_bacnet).__name__})"
+                                except Exception as e_read:
+                                    _log.error(f"General error reading object-name for {obj_id_str} at {target_ip_for_read}: {e_read}", exc_info=True)
+                                    device_data['object-name'] = f"Error: {type(e_read).__name__} reading object-name"
+                            else:
+                                device_data['object-name'] = "Error: Invalid deviceIdentifier format in I-Am"
+                                _log.warning(f"Invalid deviceIdentifier format for device at {target_ip_for_read}: {device_id_tuple}. Full I-Am data: {device_data}")
+                        except Exception as e_proc_dev:
+                            _log.error(f"Error processing device data entry for IP {ip_str} (data: {device_data}): {e_proc_dev}", exc_info=True)
+                            if isinstance(device_data, dict):
+                                device_data['processing_error'] = str(e_proc_dev)
+                            else:
+                                device_data = {{"error": "ProcessingError", "details": str(e_proc_dev), "original_data": str(device_data)}}
+                        found_devices_on_host.append(device_data)
+                _log.debug(f"Finished processing host {ip_str}. Found {len(found_devices_on_host)} potential devices.")
+                return (ip_str, found_devices_on_host)
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        discovered = []
+        for ip_address_obj in net.hosts():
+            tasks.append(asyncio.create_task(scan_host(ip_address_obj)))
 
-        for result in results:
-            if isinstance(result, Exception):
+        _log.debug(f"Created {len(tasks)} scan_host tasks for network {network_str}.")
+        gathered_results = await asyncio.gather(*tasks, return_exceptions=True)
+        _log.debug(f"Finished gathering {len(gathered_results)} scan_host results for network {network_str}.")
+        
+        discovered_devices_final = []
+        for result_item in gathered_results:
+            if isinstance(result_item, Exception):
+                _log.error(f"Exception returned from a scan_host task: {result_item}", exc_info=result_item)
                 continue
-            if result and result[1]:
-                ip_address, devices = result
-                # Add the IP address to each device
-                for device in devices:
-                    device['address'] = ip_address
-                discovered.extend(devices)
+            
+            if result_item and isinstance(result_item, tuple) and len(result_item) == 2:
+                ip_scanned_str, devices_from_this_ip = result_item
+                if devices_from_this_ip:
+                    _log.debug(f"Adding {len(devices_from_this_ip)} devices found at {ip_scanned_str} to final list.")
+                    for dev in devices_from_this_ip:
+                        dev['scanned_ip_target'] = ip_scanned_str 
+                    discovered_devices_final.extend(devices_from_this_ip)
+                else:
+                    _log.debug(f"No devices found or reported for IP: {ip_scanned_str}")
+            else:
+                _log.warning(f"Unexpected result format from scan_host task: {result_item}")
 
-        return discovered
+        _log.info(f"IP range scan for {network_str} complete. Total devices/responses processed: {len(discovered_devices_final)}.")
+        return discovered_devices_final
 
     async def read_device_all(self, device_address: str, device_object_identifier: str) -> dict:
         from bacpypes3.primitivedata import ObjectIdentifier
@@ -336,18 +405,51 @@ class BACnetProxy(AsyncioProtocolProxy):
             results['error'] = str(e)
         return results
 
-    async def who_is(self, device_instance_low, device_instance_high, dest):
-        from bacpypes3.pdu import Address
-        from bacpypes3.utils import sequence_to_json
-        destination = dest if isinstance(dest, Address) else Address(dest)
+    async def who_is(self, device_instance_low: int, device_instance_high: int, dest: str, *, apdu_timeout: Optional[float] = None):
+        from bacpypes3.pdu import Address # Keep import here if only used here
+
+        destination_addr = dest if isinstance(dest, Address) else Address(dest)
+        _log.debug(f"Sending Who-Is to {destination_addr} (low_id: {device_instance_low}, high_id: {device_instance_high}), APDU timeout: {apdu_timeout}s")
+        
+        app_instance = None
         try:
-            i_am_responses = await self.app.who_is(device_instance_low, device_instance_high, destination)
-            devices = []
-            for i_am in i_am_responses:
-                devices.append(sequence_to_json(i_am))
-            return devices
-        except Exception as e:
-            print("Error sending Who-Is request: %s", e)
+            if hasattr(self, 'bacnet') and hasattr(self.bacnet, 'app'):
+                app_instance = self.bacnet.app
+            elif hasattr(self, 'app'): # Should not be the case based on __init__ structure
+                app_instance = self.app
+            
+            if not app_instance:
+                _log.error("BACnet application instance (self.bacnet.app) not found in BACnetProxy for who_is.")
+                return []
+
+            i_am_responses = await app_instance.who_is(
+                device_instance_low,
+                device_instance_high,
+                destination_addr,
+                timeout=apdu_timeout
+            )
+            _log.debug(f"Received {len(i_am_responses)} I-Am response(s) from {destination_addr}")
+            
+            devices_found = []
+            if i_am_responses:
+                for i_am_pdu in i_am_responses:
+                    device_info = {
+                        "pduSource": str(i_am_pdu.pduSource),
+                        "deviceIdentifier": i_am_pdu.iAmDeviceIdentifier,
+                        "maxAPDULengthAccepted": i_am_pdu.maxAPDULengthAccepted,
+                        "segmentationSupported": str(i_am_pdu.segmentationSupported),
+                        "vendorID": i_am_pdu.vendorID,
+                    }
+                    devices_found.append(device_info)
+            return devices_found
+        except asyncio.TimeoutError:
+            _log.warning(f"Who-Is request to {destination_addr} timed out (APDU timeout: {apdu_timeout}s). No I-Am responses received.")
+            return []
+        except ErrorRejectAbortNack as e_bac:
+            _log.error(f"BACnet Error/Reject/Abort during Who-Is to {destination_addr}: {e_bac}", exc_info=True)
+            return []
+        except Exception as e_gen:
+            _log.error(f"Unexpected error during Who-Is request to {destination_addr}: {e_gen}", exc_info=True)
             return []
 
     @classmethod
