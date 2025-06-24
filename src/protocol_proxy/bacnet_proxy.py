@@ -216,7 +216,7 @@ class BACnetProxy(AsyncioProtocolProxy):
             net = ipaddress.ip_network(network_str, strict=False)
         except ValueError as e:
             _log.error(f"Invalid network string provided to scan_ip_range: {network_str} - {e}")
-            return [{{"error": "InvalidNetworkString", "details": str(e)}}]
+            return [{"error": "InvalidNetworkString", "details": str(e)}]
             
         tasks = []
         semaphore = asyncio.Semaphore(20)
@@ -240,8 +240,10 @@ class BACnetProxy(AsyncioProtocolProxy):
                             device_id_tuple = device_data.get('deviceIdentifier')
                             target_ip_for_read = ip_str
 
+                            # Add device_instance (flat integer) if possible
                             if device_id_tuple and isinstance(device_id_tuple, (list, tuple)) and len(device_id_tuple) == 2:
                                 device_instance = device_id_tuple[1]
+                                device_data['device_instance'] = device_instance
                                 obj_id_str = f"device,{device_instance}"
                                 _log.debug(f"Attempting to read object-name for {obj_id_str} at {target_ip_for_read}")
                                 try:
@@ -268,7 +270,7 @@ class BACnetProxy(AsyncioProtocolProxy):
                             if isinstance(device_data, dict):
                                 device_data['processing_error'] = str(e_proc_dev)
                             else:
-                                device_data = {{"error": "ProcessingError", "details": str(e_proc_dev), "original_data": str(device_data)}}
+                                device_data = {"error": "ProcessingError", "details": str(e_proc_dev), "original_data": str(device_data)}
                         found_devices_on_host.append(device_data)
                 _log.debug(f"Finished processing host {ip_str}. Found {len(found_devices_on_host)} potential devices.")
                 return (ip_str, found_devices_on_host)
