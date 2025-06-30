@@ -164,10 +164,15 @@ class IPCProtocol(BufferedProtocol):
         try:
             # Python 3.10 compatibility: use asyncio.wait_for instead of asyncio.timeout
             coro = callback_info.method(self.connector, headers, data.tobytes())
-            result = await asyncio.wait_for(coro, timeout=55)
+            # Increase timeout for operations like IP scanning that can take a long time
+            timeout_duration = 300 if headers.method_name == 'SCAN_IP_RANGE' else 55
+            result = await asyncio.wait_for(coro, timeout=timeout_duration)
         except asyncio.TimeoutError as e:
-            _log.warning(f'{self.connector.proxy_name} -- Callback {headers.method_name} timed out: {e}')
-            result = b'FOO'  # TODO: This is a testing stub.  Should probably close socket and return instead.
+            _log.warning(f'{self.connector.proxy_name} -- Callback {headers.method_name} timed out after {timeout_duration} seconds: {e}')
+            # Return a proper JSON error response instead of 'FOO'
+            import json
+            error_response = {"status": "error", "error": f"Operation timed out after {timeout_duration} seconds", "method": headers.method_name}
+            result = json.dumps(error_response).encode('utf8')
         if callback_info.provides_response:
             message = ProtocolProxyMessage(method_name='RESPONSE', payload=result, request_id=headers.request_id)
             self.transport.write(self._message_to_bytes(message))

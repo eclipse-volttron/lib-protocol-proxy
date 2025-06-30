@@ -207,22 +207,35 @@ class BACnetProxy(AsyncioProtocolProxy):
             return json.dumps(result).encode('utf8')
         except TypeError as e:
             _log.error(f"SerializationError in scan_ip_range_endpoint: {e}, result was: {result}", exc_info=True)
-            return json.dumps({{"error": "SerializationError", "details": str(e), "raw_type": str(type(result)), "raw_str": str(result)}}).encode('utf8')
+            return json.dumps({"error": "SerializationError", "details": str(e), "raw_type": str(type(result)), "raw_str": str(result)}).encode('utf8')
 
     async def scan_ip_range(self, network_str: str, whois_timeout: float = 3.0) -> list:
         import ipaddress # Moved import inside for clarity, though module level is also fine
-        _log.info(f"Starting IP range scan for network: {network_str} with Who-Is timeout: {whois_timeout}s")
+        import time
+        start_time = time.time()
+        max_scan_duration = 280  # 280 seconds to leave buffer for callback timeout
+        _log.info(f"Starting IP range scan for network: {network_str} with Who-Is timeout: {whois_timeout}s, max scan duration: {max_scan_duration}s")
         try:
             net = ipaddress.ip_network(network_str, strict=False)
         except ValueError as e:
             _log.error(f"Invalid network string provided to scan_ip_range: {network_str} - {e}")
             return [{"error": "InvalidNetworkString", "details": str(e)}]
+        
+        # Check if the network is too large and warn
+        num_hosts = net.num_addresses - 2 if net.num_addresses > 2 else net.num_addresses  # Subtract network and broadcast
+        if num_hosts > 1000:
+            _log.warning(f"Large network detected: {num_hosts} hosts. This may take a very long time or timeout.")
             
         tasks = []
         semaphore = asyncio.Semaphore(20)
 
         async def scan_host(ip_obj):
             ip_str = str(ip_obj)
+            # Check if we're running out of time
+            if time.time() - start_time > max_scan_duration:
+                _log.warning(f"Scan time limit reached, skipping remaining hosts starting with {ip_str}")
+                return (ip_str, [{"error": "ScanTimeLimit", "message": "Scan time limit reached"}])
+                
             async with semaphore:
                 _log.debug(f"Scanning host: {ip_str} with Who-Is timeout: {whois_timeout}s")
                 i_am_responses = [] # Initialize to ensure it's defined
@@ -280,9 +293,12 @@ class BACnetProxy(AsyncioProtocolProxy):
 
         _log.debug(f"Created {len(tasks)} scan_host tasks for network {network_str}.")
         gathered_results = await asyncio.gather(*tasks, return_exceptions=True)
-        _log.debug(f"Finished gathering {len(gathered_results)} scan_host results for network {network_str}.")
+        elapsed_time = time.time() - start_time
+        _log.debug(f"Finished gathering {len(gathered_results)} scan_host results for network {network_str} in {elapsed_time:.2f} seconds.")
         
         discovered_devices_final = []
+        scan_aborted = False
+        
         for result_item in gathered_results:
             if isinstance(result_item, Exception):
                 _log.error(f"Exception returned from a scan_host task: {result_item}", exc_info=result_item)
@@ -291,6 +307,12 @@ class BACnetProxy(AsyncioProtocolProxy):
             if result_item and isinstance(result_item, tuple) and len(result_item) == 2:
                 ip_scanned_str, devices_from_this_ip = result_item
                 if devices_from_this_ip:
+                    # Check if any device indicates scan was aborted due to time limit
+                    if any(isinstance(d, dict) and d.get('error') == 'ScanTimeLimit' for d in devices_from_this_ip):
+                        scan_aborted = True
+                        _log.info(f"Scan was aborted at {ip_scanned_str} due to time limit")
+                        break
+                    
                     _log.debug(f"Adding {len(devices_from_this_ip)} devices found at {ip_scanned_str} to final list.")
                     for dev in devices_from_this_ip:
                         dev['scanned_ip_target'] = ip_scanned_str 
@@ -300,7 +322,22 @@ class BACnetProxy(AsyncioProtocolProxy):
             else:
                 _log.warning(f"Unexpected result format from scan_host task: {result_item}")
 
-        _log.info(f"IP range scan for {network_str} complete. Total devices/responses processed: {len(discovered_devices_final)}.")
+        final_message = f"IP range scan for {network_str} {'partially completed (time limit reached)' if scan_aborted else 'complete'}. Total devices found: {len(discovered_devices_final)}. Scan time: {elapsed_time:.2f}s"
+        _log.info(final_message)
+        
+        # Add scan metadata to help with debugging
+        if scan_aborted:
+            discovered_devices_final.append({
+                "scan_info": {
+                    "status": "partial",
+                    "reason": "Time limit reached",
+                    "network": network_str,
+                    "scan_duration_seconds": elapsed_time,
+                    "max_duration_seconds": max_scan_duration,
+                    "total_hosts_in_network": num_hosts
+                }
+            })
+        
         return discovered_devices_final
 
     async def read_device_all(self, device_address: str, device_object_identifier: str) -> dict:
