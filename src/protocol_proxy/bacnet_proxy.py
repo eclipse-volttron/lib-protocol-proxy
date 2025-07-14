@@ -44,7 +44,7 @@ class BACnetProxy(AsyncioProtocolProxy):
         self.register_callback(self.write_property_endpoint, 'WRITE_PROPERTY', provides_response=True)
         self.register_callback(self.read_device_all_endpoint, 'READ_DEVICE_ALL', provides_response=True)
         self.register_callback(self.who_is_endpoint, 'WHO_IS', provides_response=True)
-        self.register_callback(self.scan_ip_range_endpoint, 'SCAN_IP_RANGE', provides_response=True)
+        self.register_callback(self.scan_subnet_endpoint, 'SCAN_SUBNET', provides_response=True)
 
     @callback
     async def confirmed_private_transfer_endpoint(self, _, raw_message: bytes):
@@ -197,19 +197,19 @@ class BACnetProxy(AsyncioProtocolProxy):
             return json.dumps({"error": "SerializationError", "details": str(e), "raw_type": str(type(result)), "raw_str": str(result)}).encode('utf8')
 
     @callback
-    async def scan_ip_range_endpoint(self, _, raw_message: bytes):
-        """Endpoint for scanning an IP range for BACnet devices."""
+    async def scan_subnet_endpoint(self, _, raw_message: bytes):
+        """Endpoint for scanning a subnet for BACnet devices."""
         message = json.loads(raw_message.decode('utf8'))
         network_str = message['network_str']
-        _log.debug(f"scan_ip_range_endpoint called with network_str: {network_str}")
-        result = await self.scan_ip_range(network_str) # Using default timeout for now
+        _log.debug(f"scan_subnet_endpoint called with network_str: {network_str}")
+        result = await self.scan_subnet(network_str) # Using default timeout for now
         try:
             return json.dumps(result).encode('utf8')
         except TypeError as e:
-            _log.error(f"SerializationError in scan_ip_range_endpoint: {e}, result was: {result}", exc_info=True)
+            _log.error(f"SerializationError in scan_subnet_endpoint: {e}, result was: {result}", exc_info=True)
             return json.dumps({"error": "SerializationError", "details": str(e), "raw_type": str(type(result)), "raw_str": str(result)}).encode('utf8')
 
-    async def scan_ip_range(self, network_str: str, whois_timeout: float = 3.0) -> list:
+    async def scan_subnet(self, network_str: str, whois_timeout: float = 3.0) -> list:
         import ipaddress # Moved import inside for clarity, though module level is also fine
         import time
         start_time = time.time()
@@ -235,55 +235,20 @@ class BACnetProxy(AsyncioProtocolProxy):
             if time.time() - start_time > max_scan_duration:
                 _log.warning(f"Scan time limit reached, skipping remaining hosts starting with {ip_str}")
                 return (ip_str, [{"error": "ScanTimeLimit", "message": "Scan time limit reached"}])
-                
+
             async with semaphore:
                 _log.debug(f"Scanning host: {ip_str} with Who-Is timeout: {whois_timeout}s")
-                i_am_responses = [] # Initialize to ensure it's defined
+                i_am_responses = []
                 try:
                     i_am_responses = await self.who_is(0, 4194303, ip_str, apdu_timeout=whois_timeout)
                 except Exception as e:
                     _log.error(f"Exception calling self.who_is for {ip_str}: {e}", exc_info=True)
-                    # i_am_responses remains empty or as set before error
-                
+
                 _log.debug(f"Who-Is responses for {ip_str}: {i_am_responses}")
                 found_devices_on_host = []
                 if i_am_responses:
                     for device_data in i_am_responses:
-                        try:
-                            device_id_tuple = device_data.get('deviceIdentifier')
-                            target_ip_for_read = ip_str
-
-                            # Add device_instance (flat integer) if possible
-                            if device_id_tuple and isinstance(device_id_tuple, (list, tuple)) and len(device_id_tuple) == 2:
-                                device_instance = device_id_tuple[1]
-                                device_data['device_instance'] = device_instance
-                                obj_id_str = f"device,{device_instance}"
-                                _log.debug(f"Attempting to read object-name for {obj_id_str} at {target_ip_for_read}")
-                                try:
-                                    obj_name = await asyncio.wait_for(
-                                        self.bacnet.read_property(target_ip_for_read, obj_id_str, "object-name"),
-                                        timeout=5.0 
-                                    )
-                                    device_data['object-name'] = obj_name
-                                    _log.debug(f"Successfully read object-name for {obj_id_str} at {target_ip_for_read}: {obj_name}")
-                                except asyncio.TimeoutError:
-                                    _log.warning(f"Timeout reading object-name for {obj_id_str} at {target_ip_for_read}")
-                                    device_data['object-name'] = "Error: Timeout reading object-name"
-                                except ErrorRejectAbortNack as e_bacnet:
-                                    _log.warning(f"BACnet error reading object-name for {obj_id_str} at {target_ip_for_read}: {e_bacnet}")
-                                    device_data['object-name'] = f"Error: BACnet error ({type(e_bacnet).__name__})"
-                                except Exception as e_read:
-                                    _log.error(f"General error reading object-name for {obj_id_str} at {target_ip_for_read}: {e_read}", exc_info=True)
-                                    device_data['object-name'] = f"Error: {type(e_read).__name__} reading object-name"
-                            else:
-                                device_data['object-name'] = "Error: Invalid deviceIdentifier format in I-Am"
-                                _log.warning(f"Invalid deviceIdentifier format for device at {target_ip_for_read}: {device_id_tuple}. Full I-Am data: {device_data}")
-                        except Exception as e_proc_dev:
-                            _log.error(f"Error processing device data entry for IP {ip_str} (data: {device_data}): {e_proc_dev}", exc_info=True)
-                            if isinstance(device_data, dict):
-                                device_data['processing_error'] = str(e_proc_dev)
-                            else:
-                                device_data = {"error": "ProcessingError", "details": str(e_proc_dev), "original_data": str(device_data)}
+                        # Only add the I-Am response data, do not read object-name or any other property
                         found_devices_on_host.append(device_data)
                 _log.debug(f"Finished processing host {ip_str}. Found {len(found_devices_on_host)} potential devices.")
                 return (ip_str, found_devices_on_host)

@@ -36,7 +36,7 @@ class AsyncioBACnetManager:
             # result = await self.ppm.send(peer.socket_params,
             #              ProtocolProxyMessage(
             #                  method_name='QUERY_DEVICE',
-            #                  payload=json.dumps({'address': '130.20.24.157'}).encode('utf8'),
+            #                  payload=json.dumps({'address': '192.168.1.101'}).encode('utf8'),
             #                 response_expected=True
             #              ))
             # if isinstance(result, asyncio.Future):
@@ -55,7 +55,7 @@ class AsyncioBACnetManager:
             #                           ProtocolProxyMessage(
             #                               method_name='READ_PROPERTY',
             #                               payload=json.dumps({
-            #                                   'device_address': '130.20.24.157',
+            #                                   'device_address': '192.168.1.101',
             #                                   'object_identifier': str(device_id),
             #                                   'property_identifier': 'object-list'
             #                               }).encode('utf8'),
