@@ -46,6 +46,10 @@ class BACnetProxy(AsyncioProtocolProxy):
         self.register_callback(self.who_is_endpoint, 'WHO_IS', provides_response=True)
         self.register_callback(self.scan_subnet_endpoint, 'SCAN_SUBNET', provides_response=True)
 
+        
+        self.register_callback(self.read_object_list_names_endpoint, 'READ_OBJECT_LIST_NAMES', provides_response=True)
+        self.register_callback(self.read_object_list_names_endpoint, 'READ_OBJECT_LIST', provides_response=True)
+
     @callback
     async def confirmed_private_transfer_endpoint(self, _, raw_message: bytes):
         """Endpoint for confirmed private transfer."""
@@ -208,6 +212,58 @@ class BACnetProxy(AsyncioProtocolProxy):
         except TypeError as e:
             _log.error(f"SerializationError in scan_subnet_endpoint: {e}, result was: {result}", exc_info=True)
             return json.dumps({"error": "SerializationError", "details": str(e), "raw_type": str(type(result)), "raw_str": str(result)}).encode('utf8')
+
+    @callback
+    async def read_object_list_names_endpoint(self, _, raw_message: bytes):
+        """Endpoint for reading object-list and object-names from a BACnet device."""
+        import traceback
+        try:
+            message = json.loads(raw_message.decode('utf8'))
+            device_address = message['device_address']
+            device_object_identifier = message['device_object_identifier']
+            
+            logging.getLogger(__name__).info(f"read_object_list_names_endpoint called for device {device_address}")
+            
+            # Check if the BACnet application is still connected
+            if not hasattr(self.bacnet, 'app') or self.bacnet.app is None:
+                return json.dumps({"status": "error", "error": "BACnet application not available"}).encode('utf8')
+            
+            result = await self.read_object_list_names(device_address, device_object_identifier)
+            
+            logging.getLogger(__name__).info(f"read_object_list_names returned {len(result)} results")
+            
+            # Check for error in the result
+            if 'error' in result:
+                logging.getLogger(__name__).error(f"Error in read_object_list_names: {result['error']}")
+                return json.dumps({"status": "error", "error": result['error']}).encode('utf8')
+            
+            def make_jsonable(val):
+                if isinstance(val, (str, int, float, bool)):
+                    return val
+                if isinstance(val, (list, tuple, set)):
+                    return [make_jsonable(v) for v in val]
+                if isinstance(val, (bytes, bytearray)):
+                    return val.hex()
+                if hasattr(val, '__dict__') and not isinstance(val, type):
+                    return {str(k): make_jsonable(v) for k, v in val.__dict__.items()}
+                import ipaddress
+                if isinstance(val, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+                    return str(val)
+                return f"FORCED:{str(val)}"
+            
+            # TEST: Limit response to first 10 objects to test if size is the issue
+            limited_result = dict(list(result.items())[:10])
+            logging.getLogger(__name__).info(f"Limited response to {len(limited_result)} objects for testing")
+            
+            jsonable_result = {str(k): make_jsonable(v) for k, v in limited_result.items()}
+            
+            logging.getLogger(__name__).info(f"Sending response with {len(jsonable_result)} object names")
+            
+            return json.dumps(jsonable_result).encode('utf8')
+        except Exception as e:
+            tb = traceback.format_exc()
+            logging.getLogger(__name__).error(f"Exception in read_object_list_names_endpoint: {e}\n{tb}")
+            return json.dumps({"status": "error", "error": str(e), "traceback": tb}).encode('utf8')
 
     async def scan_subnet(self, network_str: str, whois_timeout: float = 3.0) -> list:
         import ipaddress # Moved import inside for clarity, though module level is also fine
@@ -394,7 +450,6 @@ class BACnetProxy(AsyncioProtocolProxy):
             ) for prop in properties
         ]
         results = {}
-        import logging
         def callback(key, value):
             logging.getLogger(__name__).debug(f"BatchRead callback: key={key}, value={value}")
             results[key] = value
@@ -408,6 +463,81 @@ class BACnetProxy(AsyncioProtocolProxy):
             logging.getLogger(__name__).exception(f"Exception in BatchRead: {e}")
             results['error'] = str(e)
         return results
+
+    async def read_object_list_names(self, device_address: str, device_object_identifier: str) -> dict:
+        """
+        Reads the object-list from a device, then reads object-name for each object in the list.
+        Returns a dict mapping object-identifier to object-name.
+        """
+        from bacpypes3.primitivedata import ObjectIdentifier
+        from bacpypes3.basetypes import PropertyReference
+        from bacpypes3.lib.batchread import BatchRead, DeviceAddressObjectPropertyReference
+        
+        logging.getLogger(__name__).info(f"Starting read_object_list_names for device {device_address}")
+        
+        # Step 1: Read object-list property
+        try:
+            object_list = await self.bacnet.read_property(
+                device_address,
+                device_object_identifier,
+                "object-list"
+            )
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Failed to read object-list: {e}")
+            return {"error": f"Failed to read object-list: {e}"}
+        
+        if not object_list or not isinstance(object_list, (list, tuple)):
+            return {"error": "Could not read object-list or invalid format", "object_list": object_list}
+        
+        logging.getLogger(__name__).info(f"Read object-list with {len(object_list)} objects")
+        
+        # Step 2: Prepare batch read for object-name of each object
+        daopr_list = []
+        for objid in object_list:
+            # objid should be [type, instance] or tuple
+            try:
+                obj_identifier = ObjectIdentifier(objid)
+            except Exception:
+                logging.getLogger(__name__).warning(f"Failed to parse object identifier: {objid}")
+                continue
+            daopr_list.append(
+                DeviceAddressObjectPropertyReference(
+                    key=str(obj_identifier),
+                    device_address=device_address,
+                    object_identifier=obj_identifier,
+                    property_reference=PropertyReference("object-name")
+                )
+            )
+        
+        logging.getLogger(__name__).info(f"Prepared batch read for {len(daopr_list)} objects")
+        
+        results = {}
+        def callback(key, value):
+            logging.getLogger(__name__).debug(f"BatchRead object-name callback: key={key}, value={value}")
+            results[key] = value
+        
+        batch = BatchRead(daopr_list)
+        try:
+            await asyncio.wait_for(batch.run(self.bacnet.app, callback=callback), timeout=90)
+            logging.getLogger(__name__).info(f"BatchRead completed successfully with {len(results)} results")
+            
+            # Check if we have any results after the batch read
+            if not results:
+                logging.getLogger(__name__).warning("BatchRead completed but no results were received")
+                return {"error": "No results received from BACnet device"}
+            
+        except asyncio.TimeoutError:
+            logging.getLogger(__name__).error("BatchRead timed out after 90 seconds!")
+            results['error'] = 'Timeout waiting for BACnet device response after 90 seconds.'
+        except Exception as e:
+            logging.getLogger(__name__).exception(f"Exception in BatchRead: {e}")
+            results['error'] = f'BatchRead failed: {str(e)}'
+        
+        # Log the final results before returning
+        logging.getLogger(__name__).info(f"Returning {len(results)} results from read_object_list_names")
+        
+        return results
+
 
     async def who_is(self, device_instance_low: int, device_instance_high: int, dest: str, *, apdu_timeout: Optional[float] = None):
         from bacpypes3.pdu import Address # Keep import here if only used here
