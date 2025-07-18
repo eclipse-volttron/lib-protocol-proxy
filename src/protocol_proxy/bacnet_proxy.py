@@ -252,20 +252,93 @@ class BACnetProxy(AsyncioProtocolProxy):
             
             def make_jsonable(val):
                 if isinstance(val, (str, int, float, bool)):
+                    # Special handling for integer units - convert to EngineeringUnits name
+                    if isinstance(val, int):
+                        # Check if this looks like a BACnet EngineeringUnits value
+                        try:
+                            from bacpypes3.basetypes import EngineeringUnits
+                            # Try to convert the integer to an EngineeringUnits enum
+                            engineering_unit = EngineeringUnits(val)
+                            unit_str = str(engineering_unit)
+                            # Handle BACnet EngineeringUnits string format
+                            if unit_str.startswith('EngineeringUnits(') and unit_str.endswith(')'):
+                                return unit_str[17:-1]  # Remove "EngineeringUnits(" and ")"
+                            else:
+                                return unit_str
+                        except (ImportError, ValueError, TypeError):
+                            # If conversion fails, return the original value
+                            pass
                     return val
+                if val is None:
+                    return None
                 if isinstance(val, (list, tuple, set)):
                     return [make_jsonable(v) for v in val]
+                if isinstance(val, dict):
+                    return {str(k): make_jsonable(v) for k, v in val.items()}
                 if isinstance(val, (bytes, bytearray)):
                     return val.hex()
-                if hasattr(val, '__dict__') and not isinstance(val, type):
-                    return {str(k): make_jsonable(v) for k, v in val.__dict__.items()}
                 if isinstance(val, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
                     return str(val)
-                return f"FORCED:{str(val)}"
+                # Handle BACnet EngineeringUnits and other enum-like objects
+                if hasattr(val, '__class__') and 'EngineeringUnits' in str(val.__class__):
+                    # This is a BACnet EngineeringUnits object
+                    unit_str = str(val)
+                    if unit_str.startswith('EngineeringUnits(') and unit_str.endswith(')'):
+                        return unit_str[17:-1]  # Remove "EngineeringUnits(" and ")"
+                    else:
+                        return unit_str
+                if hasattr(val, 'name') and hasattr(val, 'value'):
+                    # This is likely a standard Python enum
+                    return str(val.name)
+                if hasattr(val, 'name') and not hasattr(val, 'value'):
+                    # Handle other enum-like objects that only have name
+                    return str(val.name)
+                if hasattr(val, '__str__'):
+                    val_str = str(val)
+                    # Skip conversion to FORCED if it looks like an error object
+                    if 'ErrorType' in val_str or 'Error' in type(val).__name__:
+                        return None
+                    # Check if it's a BACnet EngineeringUnits string representation
+                    if 'EngineeringUnits:' in val_str or 'EngineeringUnits(' in val_str:
+                        # Extract the unit name from various formats
+                        import re
+                        match = re.search(r'EngineeringUnits(?:\(|:)\s*([^>)]+)', val_str)
+                        if match:
+                            return match.group(1).strip()
+                    return val_str
+                return str(val)
             
             # Make the results jsonable
             if 'results' in result:
-                jsonable_results = {str(k): make_jsonable(v) for k, v in result['results'].items()}
+                jsonable_results = {}
+                for obj_id, properties in result['results'].items():
+                    if isinstance(properties, dict):
+                        # Special handling for units property
+                        processed_properties = {}
+                        for prop_name, prop_value in properties.items():
+                            if prop_name == 'units' and isinstance(prop_value, int):
+                                # Convert numeric units to EngineeringUnits name
+                                try:
+                                    from bacpypes3.basetypes import EngineeringUnits
+                                    engineering_unit = EngineeringUnits(prop_value)
+                                    # Get the string representation and extract the unit name
+                                    unit_str = str(engineering_unit)
+                                    # BACnet EngineeringUnits string format is like "EngineeringUnits(amperes)"
+                                    # or just the name directly, so we need to handle both cases
+                                    if unit_str.startswith('EngineeringUnits(') and unit_str.endswith(')'):
+                                        unit_name = unit_str[17:-1]  # Remove "EngineeringUnits(" and ")"
+                                    else:
+                                        unit_name = unit_str
+                                    processed_properties[prop_name] = unit_name
+                                    logging.getLogger(__name__).debug(f"Converted units {prop_value} to {unit_name} for {obj_id}")
+                                except (ImportError, ValueError, TypeError) as e:
+                                    logging.getLogger(__name__).warning(f"Failed to convert units {prop_value} for {obj_id}: {e}")
+                                    processed_properties[prop_name] = make_jsonable(prop_value)
+                            else:
+                                processed_properties[prop_name] = make_jsonable(prop_value)
+                        jsonable_results[str(obj_id)] = processed_properties
+                    else:
+                        jsonable_results[str(obj_id)] = make_jsonable(properties)
                 result['results'] = jsonable_results
             
             logging.getLogger(__name__).info(f"Sending paginated response with {len(result.get('results', {}))} object names")
@@ -644,8 +717,12 @@ class BACnetProxy(AsyncioProtocolProxy):
 
     async def read_object_list_names_paginated(self, device_address: str, device_object_identifier: str, page: int = 1, page_size: int = 100) -> dict:
         """
-        Reads the object-list from a device (with caching), then reads object-name for a specific page of objects.
+        Reads the object-list from a device (with caching), then reads object-name and units for a specific page of objects.
         Returns a paginated response with results and pagination metadata.
+        
+        The results dict will contain object identifiers as keys, with each value being a dict containing:
+        - 'object-name': The name of the object
+        - 'units': The units property of the object (if available)
         """
         logging.getLogger(__name__).info(f"Starting read_object_list_names_paginated for device {device_address}, page {page}, page_size {page_size}")
         
@@ -687,7 +764,7 @@ class BACnetProxy(AsyncioProtocolProxy):
                 }
             }
         
-        # Step 2: Prepare batch read for object-name of each object
+        # Step 2: Prepare batch read for object-name and units of each object
         daopr_list = []
         
         for objid in page_objects:
@@ -696,32 +773,56 @@ class BACnetProxy(AsyncioProtocolProxy):
             except Exception:
                 logging.getLogger(__name__).warning(f"Failed to parse object identifier: {objid}")
                 continue
+            
+            # Add object-name property
             daopr_list.append(
                 DeviceAddressObjectPropertyReference(
-                    key=str(obj_identifier),
+                    key=f"{str(obj_identifier)}:object-name",
                     device_address=device_address,
                     object_identifier=obj_identifier,
                     property_reference=PropertyReference("object-name")
+                )
+            )
+            
+            # Add units property
+            daopr_list.append(
+                DeviceAddressObjectPropertyReference(
+                    key=f"{str(obj_identifier)}:units",
+                    device_address=device_address,
+                    object_identifier=obj_identifier,
+                    property_reference=PropertyReference("units")
                 )
             )
         
         logging.getLogger(__name__).info(f"Prepared batch read for {len(daopr_list)} objects on page {page}")
         
         # Step 3: Execute batch read
-        results = {}
+        raw_results = {}
         def callback(key, value):
             logging.getLogger(__name__).debug(f"BatchRead callback: key={key}, value={value}")
-            results[key] = value
+            raw_results[key] = value
         
         batch = BatchRead(daopr_list)
         try:
             await asyncio.wait_for(batch.run(self.bacnet.app, callback=callback), timeout=90)
-            logging.getLogger(__name__).info(f"BatchRead completed successfully with {len(results)} results for page {page}")
+            logging.getLogger(__name__).info(f"BatchRead completed successfully with {len(raw_results)} raw results for page {page}")
             
             # Check if we have any results after the batch read
-            if not results:
+            if not raw_results:
                 logging.getLogger(__name__).warning("BatchRead completed but no results were received")
                 return {"status": "error", "error": "No results received from BACnet device"}
+            
+            # Process raw results to organize by object identifier
+            results = {}
+            for key, value in raw_results.items():
+                if ':' in key:
+                    obj_id, property_name = key.rsplit(':', 1)
+                    if obj_id not in results:
+                        results[obj_id] = {}
+                    results[obj_id][property_name] = value
+                else:
+                    # Fallback for any keys without property suffix
+                    results[key] = value
             
         except asyncio.TimeoutError:
             logging.getLogger(__name__).error(f"BatchRead timed out after 90 seconds for page {page}!")
