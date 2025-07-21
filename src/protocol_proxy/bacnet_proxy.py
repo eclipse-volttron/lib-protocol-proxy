@@ -647,12 +647,13 @@ class BACnetProxy(AsyncioProtocolProxy):
 
     async def read_object_list_names_paginated(self, device_address: str, device_object_identifier: str, page: int = 1, page_size: int = 100) -> dict:
         """
-        Reads the object-list from a device (with caching), then reads object-name and units for a specific page of objects.
+        Reads the object-list from a device (with caching), then reads object-name, units, and present-value for a specific page of objects.
         Returns a paginated response with results and pagination metadata.
         
         The results dict will contain object identifiers as keys, with each value being a dict containing:
         - 'object-name': The name of the object
         - 'units': The units property of the object (if available)
+        - 'present-value': The current value of the object (if available)
         """
         logging.getLogger(__name__).info(f"Starting read_object_list_names_paginated for device {device_address}, page {page}, page_size {page_size}")
         
@@ -694,7 +695,7 @@ class BACnetProxy(AsyncioProtocolProxy):
                 }
             }
         
-        # Step 2: Prepare batch read for object-name and units of each object
+        # Step 2: Prepare batch read for object-name, units, and present-value of each object
         daopr_list = []
         
         for objid in page_objects:
@@ -721,6 +722,16 @@ class BACnetProxy(AsyncioProtocolProxy):
                     device_address=device_address,
                     object_identifier=obj_identifier,
                     property_reference=PropertyReference("units")
+                )
+            )
+            
+            # Add present-value property
+            daopr_list.append(
+                DeviceAddressObjectPropertyReference(
+                    key=f"{str(obj_identifier)}:present-value",
+                    device_address=device_address,
+                    object_identifier=obj_identifier,
+                    property_reference=PropertyReference("present-value")
                 )
             )
         
