@@ -13,8 +13,6 @@ from .ipc import callback, ProtocolHeaders, ProtocolProxyPeer, SocketParams
 from .ipc.gevent import GeventIPCConnector
 from .proxy import ProtocolProxy
 
-logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
-                    format='%(asctime)s - %(message)s')
 _log = logging.getLogger(__name__)
 
 

@@ -11,8 +11,6 @@ from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from . import callback, IPCConnector, ProtocolHeaders, ProtocolProxyMessage, SocketParams
 
-logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
-                    format='%(asctime)s - %(message)s')
 _log = logging.getLogger(__name__)
 
 

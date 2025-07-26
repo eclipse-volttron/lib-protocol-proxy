@@ -4,8 +4,6 @@ import struct
 
 from uuid import UUID
 
-logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
-                    format='%(asctime)s - %(message)s')
 _log = logging.getLogger(__name__)
 
 

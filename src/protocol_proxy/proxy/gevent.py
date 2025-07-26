@@ -8,8 +8,6 @@ from uuid import UUID
 from ..ipc.gevent import GeventIPCConnector, SocketParams
 from . import ProtocolProxy
 
-logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
-                    format='%(asctime)s - %(message)s')
 _log = logging.getLogger(__name__)
 
 

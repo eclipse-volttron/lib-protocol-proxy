@@ -6,8 +6,6 @@ from uuid import UUID
 
 from ..ipc import IPCConnector, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
 
-logging.basicConfig(filename='protoproxy.log', level=logging.DEBUG,
-                    format='%(asctime)s - %(message)s')
 _log = logging.getLogger(__name__)
 
 
