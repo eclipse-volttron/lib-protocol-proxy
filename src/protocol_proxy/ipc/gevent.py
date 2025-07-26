@@ -173,6 +173,13 @@ class GeventIPCConnector(IPCConnector):
                         s.shutdown(SHUT_RDWR)
                         s.close()
                     done = True
+        elif headers:
+            _log.warning(f'{self.proxy_name}: Received unknown method name: {headers.method_name}'
+                         f' from {s.getpeername()} with request ID: {headers.request_id}')
+            s.close()
+        else:
+            _log.warning(f'{self.proxy_name}: Unable to read headers from socket: {s.getpeername()}')
+            s.close()
 
     def _send_headers(self, s: socket, data_length: int, request_id: int, response_expected: bool, method_name: str,
                       protocol_version: int = 1):
