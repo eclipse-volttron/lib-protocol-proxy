@@ -18,7 +18,7 @@ class ProtocolProxyCallback(NamedTuple):
     method: Callable
     name: str
     provides_response: bool
-    timeout: float = 30.0
+    timeout: float
 
 
 @dataclass
@@ -99,9 +99,9 @@ class IPCConnector:
     def next_request_id(self):
         return next(self._request_id)
 
-    def register_callback(self, cb_method, method_name, provides_response=False):
+    def register_callback(self, cb_method, method_name, provides_response=False, timeout=30.0):
         _log.info(f'{self.proxy_name} registered callback: {method_name}')
-        self.callbacks[method_name] = ProtocolProxyCallback(cb_method, method_name, provides_response)
+        self.callbacks[method_name] = ProtocolProxyCallback(cb_method, method_name, provides_response, timeout=timeout)
 
     @abc.abstractmethod
     def start(self, *_, **__):

@@ -56,7 +56,7 @@ class BACnetProxy(AsyncioProtocolProxy):
         self.register_callback(self.write_property_endpoint, 'WRITE_PROPERTY', provides_response=True)
         self.register_callback(self.read_device_all_endpoint, 'READ_DEVICE_ALL', provides_response=True)
         self.register_callback(self.who_is_endpoint, 'WHO_IS', provides_response=True)
-        self.register_callback(self.scan_subnet_endpoint, 'SCAN_SUBNET', provides_response=True)
+        self.register_callback(self.scan_subnet_endpoint, 'SCAN_SUBNET', provides_response=True, timeout=300)
 
         
         self.register_callback(self.read_object_list_names_endpoint, 'READ_OBJECT_LIST_NAMES', provides_response=True)
