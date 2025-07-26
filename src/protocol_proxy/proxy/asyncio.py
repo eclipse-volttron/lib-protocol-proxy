@@ -23,6 +23,7 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         return self.inbound_server.sockets[0].getsockname()
 
     async def send_registration(self, remote: SocketParams):
+        _log.debug(f"[send_registration] Attempting to register with manager at: {remote} (type={type(remote)})")
         message = super(AsyncioProtocolProxy, self).send_registration(remote)
         manager_response = await self.send(remote, message)
         success_bytes = await manager_response if isinstance(manager_response, Future) else manager_response

@@ -58,11 +58,18 @@ class ProtocolProxyManager(GeventIPCConnector):
                         '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,
                         '--manager-port', str(self.inbound_params.port), *protocol_specific_params])
             # TODO: Discuss with Riley why/whether this block is necessary and/or helpful:
+            # Set PYTHONPATH so the proxy subprocess can import protocol_proxy
+            proxy_env = os.environ.copy()
+            # src is two levels up from this file, then 'src'
+            src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..', 'src'))
+            proxy_env['PYTHONPATH'] = src_dir + os.pathsep + proxy_env.get('PYTHONPATH', '')
+            # TODO: END block to discuss.
             proxy_process = Popen(
                 [sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
                  '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,
-                        '--manager-port', str(self.inbound_params.port), *protocol_specific_params],
-                stdin=PIPE
+                 '--manager-port', str(self.inbound_params.port), *protocol_specific_params],
+                stdin=PIPE,
+                env=proxy_env # TODO: This is added with block to discuss above. Remove if that is.
             ) #, stdout=PIPE, stderr=PIPE)
             # TODO: Implement logging along lines of AIP.start_agent() (uncomment PIPES above too).
             # TODO: Remove the following commented lines after verifying that new approach works.:
@@ -76,6 +83,8 @@ class ProtocolProxyManager(GeventIPCConnector):
             proxy_process.stdin = open(os.devnull)
             self.peers[proxy_id] = ProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id, token=new_peer_token)
             atexit.register(self.cleanup_proxy_process, proxy_process)
+            # Do NOT send to the proxy until it has registered and socket_params is set!
+            _log.debug(f"PPM: Proxy {proxy_id} created, waiting for registration before sending.")
         return self.peers[proxy_id]
 
     @callback

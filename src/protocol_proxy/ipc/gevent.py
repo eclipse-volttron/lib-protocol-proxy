@@ -75,6 +75,10 @@ class GeventIPCConnector(IPCConnector):
             result.set(raw_message)
 
     def send(self, remote: SocketParams, message: ProtocolProxyMessage) -> bool | Greenlet:
+        # Guard: do not attempt to connect if remote is invalid
+        if remote is None or getattr(remote, 'address', None) is None or getattr(remote, 'port', None) is None:
+            _log.error(f"Refusing to connect: remote SocketParams is invalid: {remote}")
+            return False
         outbound = socket(AF_INET, SOCK_STREAM)
         outbound.setblocking(False)
         try:
@@ -126,7 +130,7 @@ class GeventIPCConnector(IPCConnector):
             finally:
                 s.close()
 
-    def _receive_headers(self, s: socket) -> (int, str):
+    def _receive_headers(self, s: socket) -> tuple[int, str]:
         try:
             received = s.recv(2)
             if len(received) == 0:

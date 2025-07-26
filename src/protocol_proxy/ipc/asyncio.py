@@ -174,6 +174,7 @@ class IPCProtocol(BufferedProtocol):
             self.transport.close()
 
     def connection_made(self, transport: Transport):
+        _log.debug(f"[IPCProtocol] connection_made: transport={transport}")
         try:
             self.transport = transport
             if self.outgoing_message:
