@@ -18,6 +18,7 @@ class ProtocolProxyCallback(NamedTuple):
     method: Callable
     name: str
     provides_response: bool
+    timeout: float = 30.0
 
 
 @dataclass

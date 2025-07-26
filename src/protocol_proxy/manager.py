@@ -57,6 +57,7 @@ class ProtocolProxyManager(GeventIPCConnector):
             _log.debug([sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
                         '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,
                         '--manager-port', str(self.inbound_params.port), *protocol_specific_params])
+            # TODO: Discuss with Riley why/whether this block is necessary and/or helpful:
             proxy_process = Popen(
                 [sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
                  '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,

@@ -1,4 +1,5 @@
 import asyncio
+import json # TODO: Should we really be using JSON for error responses. If not, then what?
 import logging
 
 from asyncio import BufferedProtocol, Future, Transport
@@ -160,11 +161,13 @@ class IPCProtocol(BufferedProtocol):
 
     async def _run_callback(self, callback_info: ProtocolProxyCallback, headers, data):
         try:
-            async with asyncio.timeout(55):  # TODO: Need configurable timeout. Also, asyncio.timeout was introduced in Python 11....
-                result = await callback_info.method(self.connector, headers, data.tobytes())
+            result = await asyncio.wait_for(callback_info.method(self.connector, headers, data.tobytes()),
+                                            timeout=callback_info.timeout)
         except asyncio.TimeoutError as e:
-            _log.warning(f'{self.connector.proxy_name} -- Callback {headers.method_name} timed out: {e}')
-            result = b'FOO'  # TODO: This is a testing stub.  Should probably close socket and return instead.
+            error_message = f"timed out after {callback_info.timeout} seconds with error message: {e}"
+            _log.warning(f'{self.connector.proxy_name} -- Callback {headers.method_name} {error_message}')
+            error_response = {'status': 'error', 'error': f'Operation {error_message}', 'method': headers.method_name}
+            result = json.dumps(error_response).encode('utf8')
         if callback_info.provides_response:
             message = ProtocolProxyMessage(method_name='RESPONSE', payload=result, request_id=headers.request_id)
             self.transport.write(self._message_to_bytes(message))
