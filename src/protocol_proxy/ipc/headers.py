@@ -9,7 +9,7 @@ _log = logging.getLogger(__name__)
 
 class ProtocolHeaders:
     #  The endian_indicator and version number are added where needed and not included in the portion of the format here.
-    FORMAT = 'Q16sH16s16s'
+    FORMAT = 'Q32sH16s16s'
     HEADER_LENGTH = struct.calcsize(FORMAT)
     VERSION = 0                                     # 2 byte (16 bit) integer (H)
 
@@ -18,8 +18,8 @@ class ProtocolHeaders:
         if kwargs:
             _log.warning(f'Received extra kwargs for Proxy Protocol version {self.VERSION}: {list(kwargs.keys())}')
         self.data_length: int = data_length         # 8 byte (64 bit) integer (Q)
-        self.method_name: str = method_name         # 16-byte (32 character) string (16s)
-        self.request_id: int = request_id           # 16-byte (16 bit) integer (H)
+        self.method_name: str = method_name         # 32-byte (32 character) string (32s)
+        self.request_id: int = request_id           #  2-byte (16 bit) integer (H)
         self.sender_id = sender_id                  # 16-byte UUID (16s)
         self.sender_token = sender_token            # 16-byte UUID (16s)
         # TODO: The token, and possibly sender_id should be an actual encrypted token based on those values, not plain text.
