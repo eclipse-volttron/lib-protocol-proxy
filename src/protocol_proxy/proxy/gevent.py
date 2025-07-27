@@ -14,7 +14,7 @@ _log = logging.getLogger(__name__)
 class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
     def __init__(self, *, proxy_id: UUID, token: UUID, manager_address: str, manager_port: int, manager_id: UUID,
                  manager_token: UUID, proxy_name: str = None, registration_retry_delay: float = 20.0, **kwargs):
-        """ Base class for protocols requiring a standalone process to handle incoming and outgoing requests.
+        """ A gevent class for protocols requiring a standalone process to handle incoming and outgoing requests.
         """
         super(GeventProtocolProxy, self).__init__(proxy_id=proxy_id, token=token, proxy_name=proxy_name,
                                                   manager_address=manager_address, manager_port=manager_port,

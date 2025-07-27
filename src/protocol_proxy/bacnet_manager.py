@@ -4,7 +4,7 @@ import logging
 
 from bacpypes3.primitivedata import ObjectIdentifier, ObjectType
 
-from protocol_proxy.manager_asyncio import AsyncioProtocolProxyManager
+from protocol_proxy.manager.asyncio import AsyncioProtocolProxyManager
 from .bacnet_proxy import BACnetProxy
 from protocol_proxy.ipc import ProtocolProxyMessage
 
@@ -20,7 +20,9 @@ class AsyncioBACnetManager:
 
     async def run(self):
         await self.ppm.start()
+        _log.debug(f'BACMan: Proxy Manager started, about to get proxy.')
         await self.ppm.get_proxy((self.local_device_address, 0), local_device_address=self.local_device_address)
+        _log.debug(f'BACMan: Proxy Manager started, now running main loop and select loop.')
         await asyncio.gather(self.main_loop(), self.ppm.select_loop())
 
     async def main_loop(self):

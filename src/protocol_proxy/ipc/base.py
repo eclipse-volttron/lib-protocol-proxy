@@ -3,13 +3,15 @@ import logging
 
 from collections.abc import Generator
 from dataclasses import dataclass
-from subprocess import Popen
 from itertools import cycle
 from psutil import net_connections
 from typing import Awaitable, Callable, NamedTuple
 from uuid import UUID
 
 from . import callback, HeadersV1, ProtocolHeaders
+
+from asyncio.subprocess import Process
+from gevent.subprocess import Popen
 
 _log = logging.getLogger(__name__)
 
@@ -41,14 +43,14 @@ class SocketParams(NamedTuple):
 class ProtocolProxyPeer:
     proxy_id: UUID
     token: UUID
-    process: Popen = None
+    process: Popen | Process = None
     socket_params: SocketParams = None
 
 
 class IPCConnector:
     PROTOCOL_VERSION = {1: HeadersV1}
 
-    def __init__(self, *, proxy_id, token, proxy_name: str = None, inbound_params: SocketParams = None,
+    def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
                  chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899,
                  **kwargs):
         """ Handles socket communication between ProtocolProxy and ProtocolProxyManager.

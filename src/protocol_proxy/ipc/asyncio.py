@@ -12,7 +12,7 @@ _log = logging.getLogger(__name__)
 
 
 class AsyncioIPCConnector(IPCConnector):
-    def __init__(self, proxy_id, token, proxy_name: str = None, **kwargs):
+    def __init__(self, *, proxy_id, token, proxy_name: str = None, **kwargs):
         self.inbound_server: Server | None = None
         self.loop = asyncio.get_running_loop()
         super(AsyncioIPCConnector, self).__init__(proxy_id=proxy_id, token=token, proxy_name=proxy_name, **kwargs)
@@ -64,7 +64,7 @@ class AsyncioIPCConnector(IPCConnector):
         factory = IPCProtocol.get_factory(connector=self, on_lost_connection=on_lost_connection)
         if socket_params:
             try:
-                self.inbound_server = self.loop.create_server(factory, *socket_params, start_serving=True)
+                self.inbound_server = await self.loop.create_server(factory, *socket_params, start_serving=True)
                 return
             except (OSError, Exception) as e:
                 _log.warning(f'Unable to bind to provided inbound socket {socket_params}. Trying next available. - {e}')
@@ -194,10 +194,10 @@ class IPCProtocol(BufferedProtocol):
 
     def connection_lost(self, exc):
         try:
-            _log.debug(f'{self.connector.proxy_name} -- Connection lost, exc: "{exc}"')
-            _log.debug(f'self.on_con_lost is: {self.on_con_lost}')
-            # if self.on_con_lost is not None:
-            #     self.on_con_lost.set_result(True)  # TODO: What is using the on_con_lost thing?
+            # _log.debug(f'{self.connector.proxy_name} -- Connection lost, exc: "{exc}"')
+            # _log.debug(f'self.on_con_lost is: {self.on_con_lost}')
+            if self.on_con_lost is not None:
+                self.on_con_lost.set_result(True)  # TODO: What is using the on_con_lost thing?
         except Exception as e:
             _log.warning(f'{self.connector.proxy_name} -- Exception in connection_lost: {e}')
 
