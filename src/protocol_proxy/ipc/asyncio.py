@@ -2,13 +2,22 @@ import asyncio
 import json # TODO: Should we really be using JSON for error responses. If not, then what?
 import logging
 
-from asyncio import BufferedProtocol, Future, Transport
+from asyncio import BufferedProtocol, Condition, Future, Transport
 from asyncio.base_events import Server
+from asyncio.subprocess import Process
+from dataclasses import dataclass
 from weakref import WeakValueDictionary
 
-from . import callback, IPCConnector, ProtocolHeaders, ProtocolProxyCallback, ProtocolProxyMessage, SocketParams
+from . import (callback, IPCConnector, ProtocolHeaders, ProtocolProxyCallback, ProtocolProxyMessage, ProtocolProxyPeer,
+               SocketParams)
 
 _log = logging.getLogger(__name__)
+
+
+@dataclass
+class AsyncioProtocolProxyPeer(ProtocolProxyPeer):
+    process: Process = None
+    ready: Condition = Condition()
 
 
 class AsyncioIPCConnector(IPCConnector):
@@ -31,7 +40,7 @@ class AsyncioIPCConnector(IPCConnector):
         else:
             result.set_result(raw_message)
 
-    async def send(self, remote: SocketParams, message: ProtocolProxyMessage) -> bool | Future:
+    async def send(self, remote: AsyncioProtocolProxyPeer, message: ProtocolProxyMessage) -> bool | Future:
         #on_lost_connection = self.loop.create_future()
         if message.request_id is None:
             message.request_id = self.next_request_id
@@ -43,9 +52,9 @@ class AsyncioIPCConnector(IPCConnector):
         connection_attempts = 5
         while connection_attempts:
             try:
-                transport, _ = await self.loop.create_connection(
-                    lambda: IPCProtocol(connector=self, outgoing_message=message), *remote) # on_lost_connection=on_lost_connection,
-
+                async with remote.ready:
+                    transport, _ = await self.loop.create_connection(
+                        lambda: IPCProtocol(connector=self, outgoing_message=message), *remote.socket_params) # on_lost_connection=on_lost_connection,
                 # TODO: Wait until the protocol signals that the connection is lost and close the transport.
                 #await on_lost_connection
             except ConnectionError:

@@ -1,17 +1,25 @@
-import json
 import logging
 import struct
 
+from dataclasses import dataclass
 from gevent import select, sleep, spawn
 from gevent.event import AsyncResult
 from gevent.greenlet import Greenlet
+from gevent.lock import RLock
 from gevent.socket import socket, getaddrinfo, AF_INET, SOCK_STREAM, SHUT_RDWR
+from gevent.subprocess import Popen
 from uuid import UUID
 from weakref import WeakKeyDictionary, WeakValueDictionary
 
-from . import callback, IPCConnector, ProtocolHeaders, ProtocolProxyMessage, SocketParams
+from . import callback, IPCConnector, ProtocolHeaders, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
 
 _log = logging.getLogger(__name__)
+
+
+@dataclass
+class GeventProtocolProxyPeer(ProtocolProxyPeer):
+    process: Popen = None
+    ready: RLock = RLock()
 
 
 class GeventIPCConnector(IPCConnector):
@@ -74,19 +82,21 @@ class GeventIPCConnector(IPCConnector):
         else:
             result.set(raw_message)
 
-    def send(self, remote: SocketParams, message: ProtocolProxyMessage) -> bool | Greenlet:
-        # Guard: do not attempt to connect if remote is invalid
-        if remote is None or getattr(remote, 'address', None) is None or getattr(remote, 'port', None) is None:
-            _log.error(f"Refusing to connect: remote SocketParams is invalid: {remote}")
-            return False
+    def send(self, remote: GeventProtocolProxyPeer, message: ProtocolProxyMessage) -> bool | Greenlet:
+        """Send a message to the remote and return a bool, AsyncResult (gevent) or Future (asyncio)."""
         outbound = socket(AF_INET, SOCK_STREAM)
         outbound.setblocking(False)
         try:
-            # _log.debug(f'{self.proxy_name}: IN SEND, GOT REMOTE: {remote}')
-            if (error_code := outbound.connect_ex(remote)) != 115:
-                _log.warning(f'{self.proxy_name} Connection to outbound socket returned code: {error_code}.')
+            with remote.ready:
+                if (remote.socket_params is None
+                        or getattr(remote.socket_params, 'address', None) is None
+                        or getattr(remote.socket_params, 'port', None) is None):
+                    _log.error(f"Refusing to connect: remote SocketParams is invalid: {remote.socket_params}")
+                    return False
+                if (error_code := outbound.connect_ex(remote.socket_params)) != 115:
+                    _log.warning(f'{self.proxy_name} Connection to outbound socket returned code: {error_code}.')
         except (OSError, Exception) as e:
-            _log.warning(f"{self.proxy_name}: Unexpected error connecting to {remote}: {e}")
+            _log.warning(f"{self.proxy_name}: Unexpected error connecting to {remote.socket_params}: {e}")
             return False
         if message.request_id is None:
             message.request_id = self.next_request_id
@@ -130,7 +140,7 @@ class GeventIPCConnector(IPCConnector):
             finally:
                 s.close()
 
-    def _receive_headers(self, s: socket) -> tuple[int, str]:
+    def _receive_headers(self, s: socket) -> ProtocolHeaders | None:
         try:
             received = s.recv(2)
             if len(received) == 0:

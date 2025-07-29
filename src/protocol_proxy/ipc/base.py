@@ -1,6 +1,6 @@
-import abc
 import logging
 
+from abc import abstractmethod, ABC
 from collections.abc import Generator
 from dataclasses import dataclass
 from itertools import cycle
@@ -9,9 +9,6 @@ from typing import Awaitable, Callable, NamedTuple
 from uuid import UUID
 
 from . import callback, HeadersV1, ProtocolHeaders
-
-from asyncio.subprocess import Process
-from gevent.subprocess import Popen
 
 _log = logging.getLogger(__name__)
 
@@ -40,10 +37,14 @@ class SocketParams(NamedTuple):
 
 
 @dataclass
-class ProtocolProxyPeer:
+class ProtocolProxyPeer(ABC):
+    """ Represents a known remote system.
+            NOTE: Subclasses should implement:
+             - a "process" field to represent the remote process.
+             - a "ready" lock to indicate when the peer is ready for communication.
+    """
     proxy_id: UUID
     token: UUID
-    process: Popen | Process = None
     socket_params: SocketParams = None
 
 
@@ -71,21 +72,21 @@ class IPCConnector:
         self.register_callback(self._handle_response, 'RESPONSE')
         self._request_id = cycle(range(1, 65535))
 
-    @abc.abstractmethod
+    @abstractmethod
     def _get_ip_addresses(self, host_name: str) -> set[str]:
         pass
 
-    @abc.abstractmethod
+    @abstractmethod
     @callback
     def _handle_response(self, headers: ProtocolHeaders, raw_message: bytes):
         pass
 
-    @abc.abstractmethod
-    def send(self, remote: SocketParams, message: ProtocolProxyMessage):
+    @abstractmethod
+    def send(self, remote: ProtocolProxyPeer, message: ProtocolProxyMessage):
         """Send a message to the remote and return a bool, AsyncResult (gevent) or Future (asyncio)."""
         pass
 
-    @abc.abstractmethod
+    @abstractmethod
     def _setup_inbound_server(self, socket_params: SocketParams = None):
         pass
 
@@ -105,10 +106,10 @@ class IPCConnector:
         _log.info(f'{self.proxy_name} registered callback: {method_name}')
         self.callbacks[method_name] = ProtocolProxyCallback(cb_method, method_name, provides_response, timeout=timeout)
 
-    @abc.abstractmethod
+    @abstractmethod
     def start(self, *_, **__):
         pass
 
-    @abc.abstractmethod
+    @abstractmethod
     def stop(self):
         pass

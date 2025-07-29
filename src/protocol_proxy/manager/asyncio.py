@@ -1,13 +1,16 @@
 import asyncio
+import atexit
 import logging
 import os
+import signal
 
 from abc import ABC
+from asyncio.subprocess import Process
 from uuid import uuid4
 from typing import Type
 
 from ..ipc import callback, ProtocolHeaders, ProtocolProxyPeer
-from ..ipc.asyncio import AsyncioIPCConnector
+from ..ipc.asyncio import AsyncioIPCConnector, AsyncioProtocolProxyPeer
 from ..proxy import ProtocolProxy
 from . import ProtocolProxyManager
 
@@ -18,52 +21,67 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
     def __init__(self, proxy_class: Type[ProtocolProxy], **kwargs):
         super().__init__(proxy_class=proxy_class, **kwargs)
 
-    async def wait_peer_ready(self, peer, timeout, func):
-        def is_ready(peer):
-            return peer.socket_params is not None
-
-        # TODO:
-        #  - if func, check periodically if a new peer has finished registration.
-        #       - run func once the peer is ready.
-        #  - remove the peer (and logs a warning) if it times out without registering.
-        pass
+    async def wait_peer_registered(self, peer, timeout, func=None, *args, **kwargs):
+        """ Waits for a peer to be ready, optionally calling a function when it is.
+            If the peer does not register within the timeout, it is removed and a warning is logged.
+        """
+        try:
+            async with peer.ready:
+                await peer.ready.wait_for(lambda: peer.socket_params is not None)
+                if func:
+                    func(*args, **kwargs)
+                peer.ready.notify_all()
+        except asyncio.TimeoutError:
+            _log.warning(f"Peer {peer.proxy_id} did not register within {timeout} seconds. Removing peer.")
+            del self.peers[peer.proxy_id]
+        except Exception as e:
+            _log.error(f"Error while waiting for peer {peer.proxy_id} to be ready: {e}. Removing peer.")
+            del self.peers[peer.proxy_id]
 
     async def get_proxy(self, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
         command, proxy_id, proxy_name = self._setup_proxy_process_command(unique_remote_id, **kwargs)  # , proxy_env
         if command:
-            # TODO: proxy_env parameter was added with block to discuss in super._setup_proxy_process_command(). Remove if that is.
-            _log.debug(f'ABOUT TO SEND COMMAND: "{command}"')
-            proxy_process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE) #, env=proxy_env)
+            proxy_process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE)
             # , stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             # TODO: Implement logging along lines of AIP.start_agent() (uncomment PIPES above too).
             _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
-            new_peer_token = uuid4()
-            proxy_process.stdin.write(new_peer_token.hex.encode())
+            peer_token = uuid4()
+            proxy_process.stdin.write(peer_token.hex.encode())
             proxy_process.stdin.write(self.token.hex.encode())
-            _log.debug("PPM: Done writing to stdin, about to drain.")
             await proxy_process.stdin.drain()
-            _log.debug("PPM: Done writing to stdin, after drain.")
             proxy_process.stdin.close()
             proxy_process.stdin = open(os.devnull)
-            _log.debug("PPM: Stdin closed.")
-            self.peers[proxy_id] = ProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id, token=new_peer_token)
-            # TODO: Why was atexit call removed from asyncio version of this method? (See gevent version) There is an asyncio version if it is needed.
-            _log.debug('PPM: END OF GET_PROXY')
+            self.peers[proxy_id] = AsyncioProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id, token=peer_token)
+            self._setup_exit(proxy_process)
+            atexit.register(self.finalize_process, proxy_process)
         return self.peers[proxy_id]
-
 
     @callback
     async def handle_peer_registration(self, headers: ProtocolHeaders, raw_message: bytes):
-        return super().handle_peer_registration(headers, raw_message)
+        proxy: AsyncioProtocolProxyPeer | None = self.peers.get(headers.sender_id)
+        if not proxy:
+            _log.error(f'PPM: Received registration message from unknown peer: {headers.sender_id}.')
+            return False
+        async with proxy.ready:
+            success = super().handle_peer_registration(headers, raw_message)
+            proxy.ready.notify_all()
+            return success
 
-    # TODO: Is this override just for debugging?
-    async def start(self, *_, **__):
-        await super().start()
-        _log.debug(f'AsyncioProtocolProxyManager started.')
+    @staticmethod
+    def _setup_exit(process: Process):
+        """Set up cleanup for the proxy process on exit."""
+        def cleanup_func():
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+        asyncio.get_event_loop().add_signal_handler(signal.SIGTERM, cleanup_func, process)
+        asyncio.get_event_loop().add_signal_handler(signal.SIGINT, cleanup_func, process)
 
-    # TODO: This is not a select loop, and should not be called that.
-    async def select_loop(self):
-        while not getattr(self, '_stop', False):
-            await asyncio.sleep(0.1)
-
-__all__ = ['AsyncioProtocolProxyManager']
+    @staticmethod
+    def finalize_process(process: Process):
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass

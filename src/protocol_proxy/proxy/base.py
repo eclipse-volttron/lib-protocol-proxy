@@ -16,16 +16,15 @@ class ProtocolProxy(IPCConnector):
         """NOTE: Proxy implementations MUST:
             1. Subclass a multitasking subclass of IPCConnector (gevent, asyncio, etc.)
             2. Subclass this "ProtocolProxy" class.
-            3. Call super first to IPCConnector parent then this ProtocolProxy parent.
-            4. Call send_registration asynchronously in their constructor after super calls.
+            3. Call super first to IPCConnector parent then this ProtocolProxy parent._
+            4. Create a ProtocolProxyPeer subclass for the manager and store it in self.peers.
+            5. Call send_registration asynchronously in their constructor after super calls.
         """
         _log.debug('PP: IN INIT.')
         super(ProtocolProxy, self).__init__(**kwargs)
         self.registration_retry_delay: float = registration_retry_delay
         self.manager_params = SocketParams(manager_address, manager_port)
         self.manager = manager_id
-        self.peers[manager_id] = ProtocolProxyPeer(proxy_id=manager_id, socket_params=self.manager_params,
-                                                   token=manager_token)
 
 
     @abc.abstractmethod
@@ -40,8 +39,11 @@ class ProtocolProxy(IPCConnector):
         pass
 
     @abc.abstractmethod
-    def send_registration(self, remote: SocketParams):
-        # _log.debug(f'{self.proxy_name}: IN SEND REGISTRATION')
+    def send_registration(self, remote: ProtocolProxyPeer) -> ProtocolProxyMessage:
+        """Send a registration message to the remote manager."""
+
+    def _get_registration_message(self):
+        # _log.debug(f'{self.proxy_name}: IN GET REGISTRATION MESSAGE')
         local_address, local_port = self.get_local_socket_params()
         message = ProtocolProxyMessage(
             method_name='REGISTER_PEER',
@@ -49,6 +51,4 @@ class ProtocolProxy(IPCConnector):
                                  'token': self.token.hex}).encode('utf8'),
             response_expected=True
         )
-        # _log.debug(f'{self.proxy_name} IN SEND REGISTRATION, BEFORE SEND')
-        # TODO: Inability to connect while on VPN, but is this related to MQTT or to local sockets.
         return message

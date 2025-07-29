@@ -1,15 +1,13 @@
-import abc
 import json
 import logging
-import os
 import sys
 
-from abc import ABC
+from abc import abstractmethod, ABC
 from typing import Type
 from uuid import uuid4, UUID
 from weakref import WeakValueDictionary
 
-from ..ipc import callback, IPCConnector, ProtocolHeaders, ProtocolProxyPeer, SocketParams
+from ..ipc import IPCConnector, ProtocolHeaders, ProtocolProxyPeer, SocketParams
 from ..proxy import ProtocolProxy
 
 _log = logging.getLogger(__name__)
@@ -24,13 +22,12 @@ class ProtocolProxyManager(IPCConnector, ABC):
         self.proxy_class = proxy_class
         self.register_callback(self.handle_peer_registration, 'REGISTER_PEER', provides_response=True)
 
-    @abc.abstractmethod
-    def wait_peer_ready(self, peer, timeout, func):
-        # TODO:
-        #  - if func, check periodically if a new peer has finished registration.
-        #       - run func once the peer is ready.
+    @abstractmethod
+    def wait_peer_registered(self, peer, timeout, func=None, *args, **kwargs):
+        """ Waits for a peer to be ready, optionally calling a function when it is.
+            - if a func is passed, run it with any passed args/kwargs once the peer is ready.
         #  - remove the peer (and logs a warning) if it times out without registering.
-        pass
+        """
 
     def _setup_proxy_process_command(self, unique_remote_id: tuple, **kwargs) -> tuple:
         _log.debug(f'UAI is: {unique_remote_id}')
@@ -56,7 +53,7 @@ class ProtocolProxyManager(IPCConnector, ABC):
             command = None  #, proxy_env = None, None
         return command, proxy_id, proxy_name # , proxy_env
 
-    @abc.abstractmethod
+    @abstractmethod
     def get_proxy(self, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
         pass
 
@@ -72,11 +69,15 @@ class ProtocolProxyManager(IPCConnector, ABC):
     def handle_peer_registration(self, headers: ProtocolHeaders, raw_message: bytes):
         message = json.loads(raw_message.decode('utf8'))
         proxy: ProtocolProxyPeer = self.peers.get(headers.sender_id)
-        if (address := message.get('address')) and (port := message.get('port')):
+        if not proxy:
+            _log.error(f'PPM: Received registration message from unknown peer: {headers.sender_id}.')
+            return json.dumps(False).encode('utf8')
+        if  (address := message.get('address')) and (port := message.get('port')):
             proxy.socket_params = SocketParams(address=address, port=port)
             _log.info(f'PPM: Successfully registered peer: {proxy.proxy_id} @ {proxy.socket_params}')
             return json.dumps(True).encode('utf8')
         else:  # TODO: Is there any reasonable situation where this runs and returns false?
+            _log.error(f'PPM: Failed to register peer: {proxy.proxy_id} with message: {message}.')
             return json.dumps(False).encode('utf8')
 
     @classmethod
@@ -85,6 +86,6 @@ class ProtocolProxyManager(IPCConnector, ABC):
             manager = cls.managers[proxy_class.__name__]
         else:
             _log.info(f'Creating manager of class "{cls.__name__}" for new proxies of class: ({proxy_class.__name__}).')
-            manager = cls(proxy_class)
+            manager = cls(proxy_class=proxy_class)
             cls.managers[proxy_class.__name__] = manager
         return manager

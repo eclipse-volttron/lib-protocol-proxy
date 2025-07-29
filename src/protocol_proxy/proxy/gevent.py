@@ -5,7 +5,7 @@ from gevent import sleep, spawn
 from gevent.event import AsyncResult
 from uuid import UUID
 
-from ..ipc.gevent import GeventIPCConnector, SocketParams
+from ..ipc.gevent import GeventIPCConnector, GeventProtocolProxyPeer, SocketParams
 from . import ProtocolProxy
 
 _log = logging.getLogger(__name__)
@@ -20,13 +20,15 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
                                                   manager_address=manager_address, manager_port=manager_port,
                                                   manager_id=manager_id, manager_token=manager_token,
                                                   registration_retry_delay=registration_retry_delay, **kwargs)
-        spawn(self.send_registration, self.manager_params)
+        self.peers[manager_id] = GeventProtocolProxyPeer(proxy_id=manager_id, socket_params=self.manager_params,
+                                                   token=manager_token)
+        spawn(self.send_registration, self.peers[manager_id])
 
     def get_local_socket_params(self) -> SocketParams:
         return self.inbound_server_socket.getsockname()
 
-    def send_registration(self, remote: SocketParams):
-        message = super(GeventProtocolProxy, self).send_registration(remote)
+    def send_registration(self, remote: GeventProtocolProxyPeer):
+        message = self._get_registration_message()
         manager_response = self.send(remote, message)
         # TODO: This should be using a try block to catch the timeout. Is the return even useful?
         success = manager_response.get(timeout=5) if isinstance(manager_response, AsyncResult) else manager_response
