@@ -3,6 +3,7 @@ import logging
 import sys
 
 from abc import abstractmethod, ABC
+from importlib import import_module
 from typing import Type
 from uuid import uuid4, UUID
 from weakref import WeakValueDictionary
@@ -53,9 +54,26 @@ class ProtocolProxyManager(IPCConnector, ABC):
             command = None  #, proxy_env = None, None
         return command, proxy_id, proxy_name # , proxy_env
 
+    @classmethod
     @abstractmethod
-    def get_proxy(self, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
-        pass
+    def get_proxy(cls, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
+        """ Get or create a ProtocolProxyPeer for the specified unique_remote_id.
+                NOTE: Subclasses are required to implement this method, but
+                    should not call super. The class method is a convenience wrapper
+                    to handle the case where the ProtocolProxyManager instance needs
+                    to be found as well.  This is useful, for instance, where multiple
+                    protocols may be employed by a single user as there will be one
+                    concrete ProtocolProxyManager per protocol.
+        """
+        if isinstance(cls, ProtocolProxyManager):
+            _log.warning(f'Subclass {cls.__class__.__name__} improperly called super on abstract method get_proxy().')
+        if len(unique_remote_id) >= 1:
+            likely_module = unique_remote_id[0]
+            try:
+                manager = cls.get_manager(likely_module)
+                return manager.get_proxy(unique_remote_id, **kwargs)
+            except (ImportError, ValueError) as e:
+                _log.warning(f'Unable to find a manager for get_proxy call: {e}')
 
     def get_proxy_id(self, unique_remote_id: tuple | str) -> UUID:
         """Lookup or create a UUID for the proxy server
@@ -81,7 +99,22 @@ class ProtocolProxyManager(IPCConnector, ABC):
             return json.dumps(False).encode('utf8')
 
     @classmethod
-    def get_manager(cls, proxy_class: Type[ProtocolProxy]):
+    def get_manager(cls, proxy_class: Type[ProtocolProxy] | str):
+        """Get or create a ProtocolProxyManager for the specified proxy class.
+            If a string is passed, it will attempt to import the class from the
+            protocol_proxy.protocol.<name> module.
+           :raises: ValueError | ImportError
+        """
+        if isinstance(proxy_class, str):
+            try:
+                module = import_module('protocol_proxy.protocol.' + proxy_class)
+                if hasattr(module, 'PROXY_CLASS'):
+                    proxy_class = module.PROXY_CLASS
+            except ImportError as e:
+                raise ImportError(f'Failed to import proxy class "{proxy_class}": {e}')
+        if not isinstance(proxy_class, type) or not issubclass(proxy_class, ProtocolProxy):
+            raise ValueError(f'Unable to find the specified ProtocolProxy subclass, got {proxy_class}.')
+
         if proxy_class.__name__ in cls.managers:
             manager = cls.managers[proxy_class.__name__]
         else:
