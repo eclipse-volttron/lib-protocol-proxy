@@ -36,14 +36,16 @@ class SocketParams(NamedTuple):
         return f'{self.address}:{self.port}'
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ProtocolProxyPeer(ABC):
     """ Represents a known remote system.
-            NOTE: Subclasses should implement:
+            NOTE: Subclasses should implement concrete versions of:
              - a "process" field to represent the remote process.
              - a "ready" lock to indicate when the peer is ready for communication.
     """
+    process: Any
     proxy_id: UUID
+    ready: Any
     token: UUID
     socket_params: SocketParams = None
 
