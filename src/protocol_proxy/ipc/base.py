@@ -5,7 +5,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from itertools import cycle
 from psutil import net_connections
-from typing import Awaitable, Callable, NamedTuple
+from typing import Any, Awaitable, Callable, NamedTuple
 from uuid import UUID
 
 from . import callback, HeadersV1, ProtocolHeaders

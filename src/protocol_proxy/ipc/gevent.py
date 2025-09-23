@@ -26,7 +26,7 @@ class GeventIPCConnector(IPCConnector):
     def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
                  chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899,
                  **kwargs):
-        self.inbound_server_socket: socket = None
+        self.inbound_server_socket: socket | None = None
         super(GeventIPCConnector, self).__init__(proxy_id=proxy_id, token=token, proxy_name=proxy_name,
                                                  inbound_params=inbound_params, chunk_size=chunk_size, encrypt=encrypt,
                                                  min_port=min_port, max_port=max_port, **kwargs)
@@ -82,7 +82,7 @@ class GeventIPCConnector(IPCConnector):
         else:
             result.set(raw_message)
 
-    def send(self, remote: GeventProtocolProxyPeer, message: ProtocolProxyMessage) -> bool | Greenlet:
+    def send(self, remote: ProtocolProxyPeer, message: ProtocolProxyMessage) -> bool | AsyncResult:
         """Send a message to the remote and return a bool, AsyncResult (gevent) or Future (asyncio)."""
         outbound = socket(AF_INET, SOCK_STREAM)
         outbound.setblocking(False)

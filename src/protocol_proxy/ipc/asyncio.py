@@ -2,9 +2,8 @@ import asyncio
 import json # TODO: Should we really be using JSON for error responses. If not, then what?
 import logging
 
-from asyncio import BufferedProtocol, Condition, Future, Transport
+from asyncio import BufferedProtocol, Condition, Future, subprocess, Transport
 from asyncio.base_events import Server
-from asyncio.subprocess import Process
 from dataclasses import dataclass
 from weakref import WeakValueDictionary
 
@@ -16,7 +15,7 @@ _log = logging.getLogger(__name__)
 
 @dataclass
 class AsyncioProtocolProxyPeer(ProtocolProxyPeer):
-    process: Process = None
+    process: subprocess.Process = None
     ready: Condition = Condition()
 
 
@@ -204,9 +203,9 @@ class IPCProtocol(BufferedProtocol):
     def connection_lost(self, exc):
         try:
             # _log.debug(f'{self.connector.proxy_name} -- Connection lost, exc: "{exc}"')
-            # _log.debug(f'self.on_con_lost is: {self.on_con_lost}')
-            if self.on_con_lost is not None:
-                self.on_con_lost.set_result(True)  # TODO: What is using the on_con_lost thing?
+            _log.debug(f'self.on_con_lost is a {type(self.on_con_lost)} with value: {self.on_con_lost}')
+            # if self.on_con_lost is not None:
+            #     self.on_con_lost.set_result(True)  # TODO: What is using the on_con_lost thing?
         except Exception as e:
             _log.warning(f'{self.connector.proxy_name} -- Exception in connection_lost: {e}')
 

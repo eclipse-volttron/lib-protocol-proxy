@@ -4,7 +4,7 @@ import sys
 
 from abc import abstractmethod, ABC
 from importlib import import_module
-from typing import Type
+from typing import Callable, Iterable, Type, TypeVar
 from uuid import uuid4, UUID
 from weakref import WeakValueDictionary
 
@@ -13,6 +13,8 @@ from ..proxy import ProtocolProxy
 
 _log = logging.getLogger(__name__)
 
+
+Self = TypeVar("Self", bound="ProtocolProxyManager")  # TODO: Deprecated by typing.Self in 3.11 and later.
 
 class ProtocolProxyManager(IPCConnector, ABC):
     managers = WeakValueDictionary()
@@ -56,7 +58,7 @@ class ProtocolProxyManager(IPCConnector, ABC):
 
     @classmethod
     @abstractmethod
-    def get_proxy(cls, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
+    def get_proxy(cls, unique_remote_id: tuple, **kwargs) -> tuple[Self, ProtocolProxyPeer] | None:
         """ Get or create a ProtocolProxyPeer for the specified unique_remote_id.
                 NOTE: Subclasses are required to implement this method, but
                     should not call super. The class method is a convenience wrapper
