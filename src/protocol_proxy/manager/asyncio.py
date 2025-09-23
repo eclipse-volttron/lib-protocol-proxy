@@ -70,7 +70,7 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
     @staticmethod
     def _setup_exit(process: Process):
         """Set up cleanup for the proxy process on exit."""
-        def cleanup_func():
+        def cleanup_func(process):
             if process.returncode is None:
                 try:
                     process.terminate()
