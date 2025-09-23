@@ -72,8 +72,8 @@ class ProtocolProxyManager(IPCConnector, ABC):
         if len(unique_remote_id) >= 1:
             likely_module = unique_remote_id[0]
             try:
-                manager = cls.get_manager(likely_module)
-                return manager.get_proxy(unique_remote_id, **kwargs)
+                manager = cls.get_manager(likely_module, kwargs.get('manager_callbacks'))
+                return manager, manager.get_proxy(unique_remote_id, **kwargs)
             except (ImportError, ValueError) as e:
                 _log.warning(f'Unable to find a manager for get_proxy call: {e}')
 
@@ -101,7 +101,8 @@ class ProtocolProxyManager(IPCConnector, ABC):
             return json.dumps(False).encode('utf8')
 
     @classmethod
-    def get_manager(cls, proxy_class: Type[ProtocolProxy] | str):
+    def get_manager(cls, proxy_class: Type[ProtocolProxy] | str,
+                    manager_callbacks: Iterable[tuple[Callable, str]] = None) -> Self:
         """Get or create a ProtocolProxyManager for the specified proxy class.
             If a string is passed, it will attempt to import the class from the
             protocol_proxy.protocol.<name> module.
@@ -122,5 +123,19 @@ class ProtocolProxyManager(IPCConnector, ABC):
         else:
             _log.info(f'Creating manager of class "{cls.__name__}" for new proxies of class: ({proxy_class.__name__}).')
             manager = cls(proxy_class=proxy_class)
+            for callback in manager_callbacks or []:
+                if not callable(callback[0]) or not isinstance(callback[1], str):
+                    _log.warning('Attempted to register invalid callback for'
+                                 ' ProtocolProxyManager[{proxy_class.__name__}]: {callback}.'
+                                 ' Callback parameters must be (Callable, str)')
+                    continue
+                manager.register_callback(*callback)
             cls.managers[proxy_class.__name__] = manager
         return manager
+
+    @classmethod
+    def get_by_proxy_id(cls, proxy_id: UUID) -> tuple[Self | None, ProtocolProxyPeer | None]:
+        for manager in cls.managers.values():
+            if proxy_id in manager.peers:
+                return manager, manager.peers[proxy_id]
+        return None, None
