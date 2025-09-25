@@ -29,16 +29,18 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
 
     def send_registration(self, remote: GeventProtocolProxyPeer):
         message = self._get_registration_message()
-        manager_response = self.send(remote, message)
-        # TODO: This should be using a try block to catch the timeout. Is the return even useful?
-        success = manager_response.get(timeout=5) if isinstance(manager_response, AsyncResult) else manager_response
         tries_remaining = 2
-        if not success:  # TODO: Shouldn't there be a loop here someplace?
-            _log.debug(f'{self.proxy_name} IN SEND REGISTRATION, NO SUCCESS, {tries_remaining} TRIES REMAINING')
-            if tries_remaining > 0:
-                sleep(self.registration_retry_delay)
-                tries_remaining -= 1
+        while tries_remaining > 0:
+            manager_response = self.send(remote, message)
+            # TODO: This should be using a try block to catch the timeout. Is the return even useful?
+            success = manager_response.get(timeout=5) if isinstance(manager_response, AsyncResult) else manager_response
+            if success:
+                _log.debug(f'IN SEND REGISTRATION, SUCCESS WAS: {success}')
+                break
             else:
-                raise SystemExit(f"Unable to register with Proxy Manager @ {self.peers[self.manager]}. Exiting.")
-        _log.debug(f'IN SEND REGISTRATION, SUCCESS WAS: {success}')
-
+                _log.debug(f'{self.proxy_name} IN SEND REGISTRATION, NO SUCCESS, {tries_remaining} TRIES REMAINING')
+                tries_remaining -= 1
+                if tries_remaining > 0:
+                    sleep(self.registration_retry_delay)
+                else:
+                    raise SystemExit(f"Unable to register with Proxy Manager @ {self.peers[self.manager]}. Exiting.")

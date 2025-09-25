@@ -125,8 +125,8 @@ class ProtocolProxyManager(IPCConnector, ABC):
             manager = cls(proxy_class=proxy_class)
             for callback in manager_callbacks or []:
                 if not callable(callback[0]) or not isinstance(callback[1], str):
-                    _log.warning('Attempted to register invalid callback for'
-                                 ' ProtocolProxyManager[{proxy_class.__name__}]: {callback}.'
+                    _log.warning(f'Attempted to register invalid callback for'
+                                 f' ProtocolProxyManager[{proxy_class.__name__}]: {callback}.'
                                  ' Callback parameters must be (Callable, str)')
                     continue
                 manager.register_callback(*callback)

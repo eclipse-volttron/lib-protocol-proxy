@@ -148,8 +148,9 @@ class GeventIPCConnector(IPCConnector):
             if len(received) == 0:
                 _log.warning(f'{self.proxy_name} received closed socket from ({s.getpeername()}.')
                 return None
-            if not (protocol := self.PROTOCOL_VERSION.get(struct.unpack('>H', received)[0])):
-                raise NotImplementedError(f'Unknown protocol version ({protocol.VERSION})'
+            version_num = struct.unpack('>H', received)[0]
+            if not (protocol := self.PROTOCOL_VERSION.get(version_num)):
+                raise NotImplementedError(f'Unknown protocol version ({version_num})'
                                           f' received from: {s.getpeername()}')
             header_bytes = s.recv(protocol.HEADER_LENGTH)
             if len(header_bytes) == protocol.HEADER_LENGTH:
