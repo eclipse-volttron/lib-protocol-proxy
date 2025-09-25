@@ -25,11 +25,13 @@ class GeventProtocolProxyPeer(ProtocolProxyPeer):
 class GeventIPCConnector(IPCConnector):
     def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
                  chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899,
-                 **kwargs):
+                 max_io_wait_seconds: float = 30.0, **kwargs):
         self.inbound_server_socket: socket | None = None
         super(GeventIPCConnector, self).__init__(proxy_id=proxy_id, token=token, proxy_name=proxy_name,
                                                  inbound_params=inbound_params, chunk_size=chunk_size, encrypt=encrypt,
                                                  min_port=min_port, max_port=max_port, **kwargs)
+        self.max_io_wait_seconds = max_io_wait_seconds  # TODO: Consider whether this should be in base class.
+
         self.inbounds: set[socket] = set()      # Sockets from which we expect to read
         self.outbounds: set[socket] = set()     # Sockets to which we expect to write
         self.outbound_messages: WeakKeyDictionary[socket, ProtocolProxyMessage] = WeakKeyDictionary()
@@ -164,20 +166,23 @@ class GeventIPCConnector(IPCConnector):
             remaining = headers.data_length
             buffer = b''
             done = False
-            while not done:  # TODO: This should not go on forever.
+            io_wait_time = 0.0
+            while not done:
                 try:
                     while chunk := s.recv(read_length := max(0, remaining if remaining < self.chunk_size else self.chunk_size)):
                         buffer += chunk
                         remaining -= read_length
-                        # TODO: Should we sleep in this loop?
                     result = spawn(cb_info.method, self, headers, buffer)
                     if cb_info.provides_response:
                         self.outbound_messages[s] = ProtocolProxyMessage(method_name='RESPONSE', payload=result,
                                                                          request_id=headers.request_id)
                         self.outbounds.add(s)
                 except BlockingIOError as e:
-                    _log.info(f'BlockingIOError: {e}')
+                    io_wait_time -= 0.1
                     sleep(0.1)
+                    if io_wait_time <= 0:
+                        _log.info(f'Timed out after {self.max_io_wait_seconds} seconds with BlockingIOError: {e}')
+                        done = True
                 except (OSError, Exception) as e:
                     _log.warning(f'{self.proxy_name}: Socket exception reading payload: {e}')
                     s.close()

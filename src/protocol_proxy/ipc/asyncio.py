@@ -104,8 +104,8 @@ class AsyncioIPCConnector(IPCConnector):
 
 
 class IPCProtocol(BufferedProtocol):
-    def __init__(self, connector: AsyncioIPCConnector, on_lost_connection=None, buffer_size=32768, minimum_read_size: int = 76,
-                 outgoing_message=None, protocol_version: int = 1):
+    def __init__(self, connector: AsyncioIPCConnector, on_lost_connection=None, buffer_size=32768,
+                 minimum_read_size: int = 76, outgoing_message=None, protocol_version: int = 1):
         self.buffer_size = buffer_size
         self.connector: AsyncioIPCConnector = connector
         # _log.debug(f'{self.connector.proxy_name} INBOUND AIPC PROTOCOL: IN PROTOCOL INIT')
