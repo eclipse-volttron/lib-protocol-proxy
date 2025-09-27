@@ -57,7 +57,7 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
         return self.peers[proxy_id]
 
     async def log_subprocess_output(self, stream: StreamReader):
-        while stream:
+        while not stream.at_eof():
             raw_line = await stream.readline()
             self.log_subprocess_output_line(raw_line)
 
