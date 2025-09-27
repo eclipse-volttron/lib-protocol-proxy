@@ -14,6 +14,8 @@ def callback(func):
                 return func(self, headers, raw_message)
             else:
                 _log.warning(f'Unable to authenticate caller: {headers.sender_id}')
+                return None
         else:
             _log.warning(f'Request from unknown party: {headers.sender_id}')
+            return None
     return verify

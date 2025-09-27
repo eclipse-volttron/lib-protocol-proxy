@@ -69,6 +69,7 @@ class ProtocolProxyManager(IPCConnector, ABC):
                 return manager, manager.get_proxy(unique_remote_id, **kwargs)
             except (ImportError, ValueError) as e:
                 _log.warning(f'Unable to find a manager for get_proxy call: {e}')
+        return None
 
     def get_proxy_id(self, unique_remote_id: tuple | str) -> UUID:
         """Lookup or create a UUID for the proxy server
