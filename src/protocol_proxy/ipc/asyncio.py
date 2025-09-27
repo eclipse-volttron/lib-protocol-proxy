@@ -108,7 +108,7 @@ class IPCProtocol(BufferedProtocol):
                  minimum_read_size: int = 76, outgoing_message=None, protocol_version: int = 1):
         self.buffer_size = buffer_size
         self.connector: AsyncioIPCConnector = connector
-        # _log.debug(f'{self.connector.proxy_name} INBOUND AIPC PROTOCOL: IN PROTOCOL INIT')
+        # _log.debug(f'{self.connector.proxy_name} INBOUND ASyncioIPC PROTOCOL: IN PROTOCOL INIT')
         self.minimum_read_size = minimum_read_size  # TODO: Default is V1 header length. Is this appropriate?
         self.outgoing_message = outgoing_message
         self.on_con_lost = on_lost_connection
@@ -139,7 +139,7 @@ class IPCProtocol(BufferedProtocol):
             # if len(self.received_data) > version_end:
             #     if not (protocol := self.connector.PROTOCOL_VERSION.get(struct.unpack('>H', self.received_data[:2])[0])):
             #         raise NotImplementedError(f'Unknown protocol version ({protocol.VERSION})'
-            #                                   f' received from: {self.transport.get_extra_info("peername")}')
+            #                                   f' received from: {self.transport.get_extra_info("peer_name")}')
             #     header_end = version_end + protocol.HEADER_LENGTH
 
             if self.count >= self.header_length:

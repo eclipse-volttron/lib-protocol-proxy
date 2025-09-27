@@ -2,6 +2,7 @@ import json
 import logging
 
 from abc import ABC
+from typing import cast
 from uuid import UUID
 
 from ..ipc.asyncio import AsyncioIPCConnector, Future, AsyncioProtocolProxyPeer, SocketParams
@@ -43,7 +44,7 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
 
     async def start(self):
         await super(AsyncioProtocolProxy, self).start()
-        await self.send_registration(self.peers[self.manager])
+        await self.send_registration(cast(AsyncioProtocolProxyPeer, self.peers[self.manager]))
 
         async with self.inbound_server:
             await self.inbound_server.serve_forever()

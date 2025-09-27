@@ -1,7 +1,6 @@
 import asyncio
 import atexit
 import logging
-import os
 import signal
 
 from abc import ABC

@@ -1,12 +1,14 @@
 import logging
 
+from typing import Any
+
 _log = logging.getLogger(__name__)
 
 
 # TODO: Do we need an Asyncio version of this?
 # TODO: Did this work with the AsyncResult removed (just returns, possibly within greenlet)?
 def callback(func):
-    def verify(self, ipc, headers, raw_message: any):
+    def verify(self, ipc, headers, raw_message: Any):
         if peer := ipc.peers.get(headers.sender_id):
             if headers.sender_token == peer.token:
                 return func(self, headers, raw_message)

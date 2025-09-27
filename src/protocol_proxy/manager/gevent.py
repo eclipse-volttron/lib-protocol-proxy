@@ -79,5 +79,4 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             except Timeout:
                 process.kill()
             except Exception as e:
-                _log.warning(f'Exception encountered attempting to terminate proxy process: {process.pid}')
-
+                _log.warning(f'Exception encountered attempting to terminate proxy process ({process.pid}): {e}')

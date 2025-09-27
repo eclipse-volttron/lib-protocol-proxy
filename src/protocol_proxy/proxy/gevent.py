@@ -3,6 +3,7 @@ import logging
 from abc import ABC
 from gevent import sleep, spawn
 from gevent.event import AsyncResult
+from typing import cast
 from uuid import UUID
 
 from ..ipc.gevent import GeventIPCConnector, GeventProtocolProxyPeer, SocketParams
@@ -22,7 +23,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
                                                   registration_retry_delay=registration_retry_delay, **kwargs)
         self.peers[manager_id] = GeventProtocolProxyPeer(proxy_id=manager_id, socket_params=self.manager_params,
                                                    token=manager_token)
-        spawn(self.send_registration, self.peers[manager_id])
+        spawn(self.send_registration, cast(GeventProtocolProxyPeer, self.peers[manager_id]))
 
     def get_local_socket_params(self) -> SocketParams:
         return self.inbound_server_socket.getsockname()

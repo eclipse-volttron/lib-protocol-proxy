@@ -45,16 +45,9 @@ class ProtocolProxyManager(IPCConnector, ABC):
             command = [sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
                        '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,
                        '--manager-port', str(self.inbound_params.port), *protocol_specific_params]
-
-            # # TODO: Discuss with Riley why/whether this block was necessary and/or helpful:
-            # # Set PYTHONPATH so the proxy subprocess can import protocol_proxy
-            # proxy_env = os.environ.copy()
-            # src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..', 'src'))
-            # proxy_env['PYTHONPATH'] = src_dir + os.pathsep + proxy_env.get('PYTHONPATH', '')
-            # # TODO: END block to discuss.
         else:
-            command = None  #, proxy_env = None, None
-        return command, proxy_id, proxy_name # , proxy_env
+            command = None
+        return command, proxy_id, proxy_name
 
     @classmethod
     @abstractmethod
