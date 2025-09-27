@@ -1,6 +1,6 @@
 import logging
 
-from abc import abstractmethod, ABC
+from abc import abstractmethod, ABC, ABCMeta
 from collections.abc import Generator
 from dataclasses import dataclass
 from itertools import cycle
@@ -50,7 +50,7 @@ class ProtocolProxyPeer(ABC):
     socket_params: SocketParams = None
 
 
-class IPCConnector:
+class IPCConnector(metaclass=ABCMeta):
     PROTOCOL_VERSION = {1: HeadersV1}
 
     def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
