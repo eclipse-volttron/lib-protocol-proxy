@@ -4,7 +4,7 @@ import logging
 import signal
 
 from abc import ABC
-from asyncio.subprocess import Process
+from asyncio import StreamReader, subprocess
 from uuid import uuid4
 from typing import Type
 
@@ -67,19 +67,19 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
             return success
 
     @staticmethod
-    def _setup_exit(process: Process):
+    def _setup_exit(process: subprocess.Process):
         """Set up cleanup for the proxy process on exit."""
-        def cleanup_func(process):
-            if process.returncode is None:
+        def cleanup_func(proc):
+            if proc.returncode is None:
                 try:
-                    process.terminate()
+                    proc.terminate()
                 except ProcessLookupError:
                     pass
         asyncio.get_event_loop().add_signal_handler(signal.SIGTERM, cleanup_func, process)
         asyncio.get_event_loop().add_signal_handler(signal.SIGINT, cleanup_func, process)
 
     @staticmethod
-    def finalize_process(process: Process):
+    def finalize_process(process: subprocess.Process):
         try:
             process.kill()
         except ProcessLookupError:
