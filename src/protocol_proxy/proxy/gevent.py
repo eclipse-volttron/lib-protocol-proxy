@@ -19,7 +19,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
         """
         super(GeventProtocolProxy, self).__init__(proxy_id=proxy_id, token=token, proxy_name=proxy_name,
                                                   manager_address=manager_address, manager_port=manager_port,
-                                                  manager_id=manager_id, manager_token=manager_token,
+                                                  manager_id=manager_id,
                                                   registration_retry_delay=registration_retry_delay, **kwargs)
         self.peers[manager_id] = GeventProtocolProxyPeer(proxy_id=manager_id, socket_params=self.manager_params,
                                                    token=manager_token)
