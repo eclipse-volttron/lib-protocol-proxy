@@ -1,9 +1,16 @@
+import logging
 import sys
 
 from argparse import ArgumentParser
 from asyncio import iscoroutinefunction, run
 from typing import Callable
 from uuid import UUID
+
+logging.basicConfig(
+    level=logging.DEBUG, stream=sys.stdout,
+    format='{"name": "%(name)s", "lineno": "%(lineno)d", "level": "%(levelname)s", "message": "%(message)s"}'
+)
+_log = logging.getLogger(__name__)
 
 def proxy_command_parser(parser: ArgumentParser = None):
     parser = parser if parser else ArgumentParser()

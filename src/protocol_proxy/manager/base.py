@@ -133,3 +133,24 @@ class ProtocolProxyManager(IPCConnector, ABC):
             if proxy_id in manager.peers:
                 return manager, manager.peers[proxy_id]
         return None, None
+
+    @abstractmethod
+    def log_subprocess_output(self, stream):
+        pass
+
+    @staticmethod
+    def log_subprocess_output_line(raw_line):
+        line = raw_line.decode().strip()
+        try:
+            try:
+                entry = json.loads(line)
+                log = logging.getLogger(entry['name'])
+                log.log(logging.getLevelName(entry['level'].upper()), f":{entry['lineno']} {entry['message']}")
+            except (json.JSONDecodeError, KeyError, TypeError):
+                log = logging.getLogger(__name__)
+                log.log(logging.ERROR, line)
+        except UnicodeDecodeError:
+            log = logging.getLogger(__name__)
+            log.log(logging.ERROR, raw_line)
+        except Exception as e:
+            _log.error(f'Encountered unknown exception parsing logs from proxy: {e}')
