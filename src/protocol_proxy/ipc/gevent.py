@@ -167,7 +167,7 @@ class GeventIPCConnector(IPCConnector):
             remaining = headers.data_length
             buffer = b''
             done = False
-            io_wait_time = 0.0
+            io_wait_time = self.max_io_wait_seconds
             while not done:
                 try:
                     while chunk := s.recv(read_length := max(0, remaining if remaining < self.chunk_size else self.chunk_size)):

@@ -2,6 +2,7 @@ import json
 import logging
 
 from abc import ABC
+from typing import cast
 from uuid import UUID
 
 from ..ipc.asyncio import AsyncioIPCConnector, Future, AsyncioProtocolProxyPeer, SocketParams
@@ -14,7 +15,7 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
     def __init__(self, manager_address: str, manager_port: int, manager_id: UUID, manager_token: UUID, token: UUID,
                  proxy_id: UUID, proxy_name: str = None, registration_retry_delay: float = 20.0, **kwargs):
         super(AsyncioProtocolProxy, self).__init__(manager_address=manager_address, manager_port=manager_port,
-                                                  manager_id=manager_id, manager_token=manager_token, proxy_id=proxy_id,
+                                                  manager_id=manager_id, proxy_id=proxy_id,
                                                   registration_retry_delay=registration_retry_delay,
                                                   token=token, proxy_name=proxy_name, **kwargs)
         self.peers[manager_id] = AsyncioProtocolProxyPeer(proxy_id=manager_id, socket_params=self.manager_params,
@@ -43,7 +44,7 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
 
     async def start(self):
         await super(AsyncioProtocolProxy, self).start()
-        await self.send_registration(self.peers[self.manager])
+        await self.send_registration(cast(AsyncioProtocolProxyPeer, self.peers[self.manager]))
 
         async with self.inbound_server:
             await self.inbound_server.serve_forever()

@@ -3,11 +3,11 @@ import logging
 import os
 
 from abc import ABC
-from gevent import sleep, with_timeout
+from gevent import sleep, spawn, with_timeout
 from gevent.subprocess import Popen, PIPE
 from gevent.timeout import Timeout
 from uuid import uuid4
-from typing import Type
+from typing import IO, Type
 
 from ..ipc import callback, ProtocolHeaders, ProtocolProxyPeer
 from ..ipc.gevent import GeventIPCConnector, GeventProtocolProxyPeer
@@ -43,10 +43,11 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
     def get_proxy(self, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
         command, proxy_id, proxy_name = self._setup_proxy_process_command(unique_remote_id, **kwargs) # , proxy_env
         if command:
-            # TODO: proxy_env parameter was added with block to discuss in super._setup_proxy_process_command(). Remove if that is.
-            proxy_process = Popen(command, stdin=PIPE) #, env=proxy_env)
-            # , stdout=PIPE, stderr=PIPE)
-            # TODO: Implement logging along lines of AIP.start_agent() (uncomment PIPES above too).
+            proxy_process = Popen(command, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+            _log.info("proxy %s has PID %s", self.proxy_name, proxy_process.pid)
+            spawn(self.log_subprocess_output, proxy_process.stdout)
+            spawn(self.log_subprocess_output, proxy_process.stderr)
+            # TODO: Ensure that logging as implemented fits with VOLTTRON logging once that is fixed..
             _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
             new_peer_token = uuid4()
             proxy_process.stdin.write(new_peer_token.hex.encode())
@@ -60,6 +61,11 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             # Do NOT send to the proxy until it has registered and socket_params is set!
             _log.debug(f"PPM: Proxy {proxy_id} created, waiting for registration before sending.")
         return self.peers[proxy_id]
+
+    def log_subprocess_output(self, stream: IO[bytes]):
+        """Reads lines from a pipe and logs them."""
+        for raw_line in iter(stream.readline, b''):
+            self.log_subprocess_output_line(raw_line)
 
     @callback
     def handle_peer_registration(self, headers: ProtocolHeaders, raw_message: bytes):
@@ -79,5 +85,4 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             except Timeout:
                 process.kill()
             except Exception as e:
-                _log.warning(f'Exception encountered attempting to terminate proxy process: {process.pid}')
-
+                _log.warning(f'Exception encountered attempting to terminate proxy process ({process.pid}): {e}')

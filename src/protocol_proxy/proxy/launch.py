@@ -1,9 +1,16 @@
+import logging
 import sys
 
 from argparse import ArgumentParser
 from asyncio import iscoroutinefunction, run
 from typing import Callable
 from uuid import UUID
+
+logging.basicConfig(
+    level=logging.DEBUG, stream=sys.stdout,
+    format='{"name": "%(name)s", "lineno": "%(lineno)d", "level": "%(levelname)s", "message": "%(message)s"}'
+)
+_log = logging.getLogger(__name__)
 
 def proxy_command_parser(parser: ArgumentParser = None):
     parser = parser if parser else ArgumentParser()
@@ -26,8 +33,8 @@ def launch(launcher_func: Callable):
     parser = proxy_command_parser()
     parser, proxy_runner = launcher_func(parser)
     opts = parser.parse_args()
-    proxy_token = UUID(hex=sys.stdin.buffer.read(32).hex())
-    manager_token = UUID(hex=sys.stdin.buffer.read(32).hex())
+    proxy_token = UUID(hex=sys.stdin.buffer.read(32).decode('utf8'))
+    manager_token = UUID(hex=sys.stdin.buffer.read(32).decode('utf8'))
     if iscoroutinefunction(proxy_runner):
         run(proxy_runner(token=proxy_token, manager_token=manager_token, **vars(opts)))
     else:

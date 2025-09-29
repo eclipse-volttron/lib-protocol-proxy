@@ -1,19 +1,19 @@
-import abc
 import logging
 import struct
 
+from abc import abstractmethod, ABCMeta
 from uuid import UUID
 
 _log = logging.getLogger(__name__)
 
 
-class ProtocolHeaders:
+class ProtocolHeaders(metaclass=ABCMeta):
     #  The endian_indicator and version number are added where needed and not included in the portion of the format here.
     FORMAT = 'Q32sH16s16s'
     HEADER_LENGTH = struct.calcsize(FORMAT)
     VERSION = 0                                     # 2 byte (16 bit) integer (H)
 
-    @abc.abstractmethod
+    @abstractmethod
     def __init__(self, data_length: int, method_name: str, request_id: int, sender_id, sender_token, **kwargs):
         if kwargs:
             _log.warning(f'Received extra kwargs for Proxy Protocol version {self.VERSION}: {list(kwargs.keys())}')
@@ -28,7 +28,7 @@ class ProtocolHeaders:
     def bitflag_is_set(bit_position, byte_value):
         return bool((byte_value & (1 << bit_position)) >> bit_position)
 
-    @abc.abstractmethod
+    @abstractmethod
     def pack(self):
         # TODO: The sender_id is currently the proxy_id, which is a tuple. This should probably become a UUID?
         #  (Need to figure out how/where to map one to the other.)
@@ -36,12 +36,12 @@ class ProtocolHeaders:
                            self.method_name.encode('utf8'), self.request_id, self.sender_id.bytes,
                            self.sender_token.bytes)
 
-    @abc.abstractmethod
+    @abstractmethod
     def unpack(self, header_bytes):
         pass
 
     def __repr__(self):
-        return f'ProtocolHeaders(FORMAT={self.FORMAT}, VERISON={self.VERSION},' \
+        return f'ProtocolHeaders(FORMAT={self.FORMAT}, VERSION={self.VERSION},' \
                f'data_length={self.data_length}, method_name={self.method_name},' \
                f' request_id={self.request_id}, sender_id={self.sender_id}, sender_token={self.sender_token}'
 

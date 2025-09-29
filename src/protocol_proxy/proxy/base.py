@@ -10,8 +10,8 @@ _log = logging.getLogger(__name__)
 
 
 # noinspection PyMissingConstructor
-class ProtocolProxy(IPCConnector):
-    def __init__(self, *, manager_address: str, manager_port: int, manager_id: UUID, manager_token: UUID,
+class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
+    def __init__(self, *, manager_address: str, manager_port: int, manager_id: UUID,
                  registration_retry_delay: float = 20.0, **kwargs):
         """NOTE: Proxy implementations MUST:
             1. Subclass a multitasking subclass of IPCConnector (gevent, asyncio, etc.)

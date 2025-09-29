@@ -1,11 +1,10 @@
 import asyncio
 import atexit
 import logging
-import os
 import signal
 
 from abc import ABC
-from asyncio.subprocess import Process
+from asyncio import StreamReader, subprocess
 from uuid import uuid4
 from typing import Type
 
@@ -41,20 +40,26 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
     async def get_proxy(self, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
         command, proxy_id, proxy_name = self._setup_proxy_process_command(unique_remote_id, **kwargs)  # , proxy_env
         if command:
-            proxy_process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE)
-            # , stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            # TODO: Implement logging along lines of AIP.start_agent() (uncomment PIPES above too).
+            proxy_process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            self.loop.create_task(self.log_subprocess_output(proxy_process.stdout))
+            self.loop.create_task(self.log_subprocess_output(proxy_process.stderr))
             _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
             peer_token = uuid4()
             proxy_process.stdin.write(peer_token.hex.encode())
             proxy_process.stdin.write(self.token.hex.encode())
             await proxy_process.stdin.drain()
             proxy_process.stdin.close()
-            proxy_process.stdin = open(os.devnull)
+            proxy_process.stdin = None
             self.peers[proxy_id] = AsyncioProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id, token=peer_token)
             self._setup_exit(proxy_process)
             atexit.register(self.finalize_process, proxy_process)
         return self.peers[proxy_id]
+
+    async def log_subprocess_output(self, stream: StreamReader):
+        while not stream.at_eof():
+            raw_line = await stream.readline()
+            self.log_subprocess_output_line(raw_line)
 
     @callback
     async def handle_peer_registration(self, headers: ProtocolHeaders, raw_message: bytes):
@@ -68,19 +73,19 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
             return success
 
     @staticmethod
-    def _setup_exit(process: Process):
+    def _setup_exit(process: subprocess.Process):
         """Set up cleanup for the proxy process on exit."""
-        def cleanup_func(process):
-            if process.returncode is None:
+        def cleanup_func(proc):
+            if proc.returncode is None:
                 try:
-                    process.terminate()
+                    proc.terminate()
                 except ProcessLookupError:
                     pass
         asyncio.get_event_loop().add_signal_handler(signal.SIGTERM, cleanup_func, process)
         asyncio.get_event_loop().add_signal_handler(signal.SIGINT, cleanup_func, process)
 
     @staticmethod
-    def finalize_process(process: Process):
+    def finalize_process(process: subprocess.Process):
         try:
             process.kill()
         except ProcessLookupError:

@@ -45,16 +45,9 @@ class ProtocolProxyManager(IPCConnector, ABC):
             command = [sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
                        '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,
                        '--manager-port', str(self.inbound_params.port), *protocol_specific_params]
-
-            # # TODO: Discuss with Riley why/whether this block was necessary and/or helpful:
-            # # Set PYTHONPATH so the proxy subprocess can import protocol_proxy
-            # proxy_env = os.environ.copy()
-            # src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..', 'src'))
-            # proxy_env['PYTHONPATH'] = src_dir + os.pathsep + proxy_env.get('PYTHONPATH', '')
-            # # TODO: END block to discuss.
         else:
-            command = None  #, proxy_env = None, None
-        return command, proxy_id, proxy_name # , proxy_env
+            command = None
+        return command, proxy_id, proxy_name
 
     @classmethod
     @abstractmethod
@@ -76,6 +69,7 @@ class ProtocolProxyManager(IPCConnector, ABC):
                 return manager, manager.get_proxy(unique_remote_id, **kwargs)
             except (ImportError, ValueError) as e:
                 _log.warning(f'Unable to find a manager for get_proxy call: {e}')
+        return None
 
     def get_proxy_id(self, unique_remote_id: tuple | str) -> UUID:
         """Lookup or create a UUID for the proxy server
@@ -139,3 +133,24 @@ class ProtocolProxyManager(IPCConnector, ABC):
             if proxy_id in manager.peers:
                 return manager, manager.peers[proxy_id]
         return None, None
+
+    @abstractmethod
+    def log_subprocess_output(self, stream):
+        pass
+
+    @staticmethod
+    def log_subprocess_output_line(raw_line):
+        line = raw_line.decode().strip()
+        try:
+            try:
+                entry = json.loads(line)
+                log = logging.getLogger(entry['name'])
+                log.log(logging.getLevelName(entry['level'].upper()), f":{entry['lineno']} {entry['message']}")
+            except (json.JSONDecodeError, KeyError, TypeError):
+                log = logging.getLogger(__name__)
+                log.log(logging.ERROR, line)
+        except UnicodeDecodeError:
+            log = logging.getLogger(__name__)
+            log.log(logging.ERROR, raw_line)
+        except Exception as e:
+            _log.error(f'Encountered unknown exception parsing logs from proxy: {e}')
