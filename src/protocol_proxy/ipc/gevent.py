@@ -146,12 +146,19 @@ class GeventIPCConnector(IPCConnector):
         try:
             received = s.recv(2)
             if len(received) == 0:
-                _log.warning(f'{self.proxy_name} received closed socket from ({s.getpeername()}.')
+                try:
+                    peer_name = f' from {s.getpeername()}.'
+                except OSError:
+                    peer_name = '.'
+                _log.warning(f'{self.proxy_name} received closed socket {peer_name}')
                 return None
             version_num = struct.unpack('>H', received)[0]
             if not (protocol := self.PROTOCOL_VERSION.get(version_num)):
-                raise NotImplementedError(f'Unknown protocol version ({version_num})'
-                                          f' received from: {s.getpeername()}')
+                try:
+                    peer_name = f' received from: {s.getpeername()}.'
+                except OSError:
+                    peer_name = '.'
+                raise NotImplementedError(f'Unknown protocol version ({version_num}){peer_name}')
             header_bytes = s.recv(protocol.HEADER_LENGTH)
             if len(header_bytes) == protocol.HEADER_LENGTH:
                 return protocol.unpack(header_bytes)
@@ -194,11 +201,19 @@ class GeventIPCConnector(IPCConnector):
                         s.close()
                     done = True
         elif headers:
+            try:
+                peer_name = f' from {s.getpeername()}'
+            except OSError:
+                peer_name = ''
             _log.warning(f'{self.proxy_name}: Received unknown method name: {headers.method_name}'
-                         f' from {s.getpeername()} with request ID: {headers.request_id}')
+                         f' {peer_name} with request ID: {headers.request_id}')
             s.close()
         else:
-            _log.warning(f'{self.proxy_name}: Unable to read headers from socket: {s.getpeername()}')
+            try:
+                peer_name = f': {s.getpeername()}.'
+            except OSError:
+                peer_name = '.'
+            _log.warning(f'{self.proxy_name}: Unable to read headers from socket: {peer_name}')
             s.close()
 
     def _send_headers(self, s: socket, data_length: int, request_id: int, response_expected: bool, method_name: str,
@@ -216,7 +231,11 @@ class GeventIPCConnector(IPCConnector):
     def _send_socket(self, s: socket):
         _log.debug(f'{self.proxy_name}: IN SEND SOCKET')
         if not (message := self.outbound_messages.get(s)):
-            _log.warning(f'Outbound socket to {s.getpeername()} was ready, but no outbound message was found.')
+            try:
+                peer_name = f'to {s.getpeername()}'
+            except OSError:
+                peer_name = ''
+            _log.warning(f'Outbound socket to {peer_name} was ready, but no outbound message was found.')
         elif isinstance(message.payload, AsyncResult) and not message.payload.ready():
             self.outbounds.add(s)
             _log.debug('IN SEND SOCKET, WAS ADDED BACK TO OUTBOUND BECAUSE ASYNC_RESULT WAS NOT READY.')
