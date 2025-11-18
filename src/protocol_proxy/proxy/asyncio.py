@@ -22,7 +22,10 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
                                                    token=manager_token)
 
     def get_local_socket_params(self) -> SocketParams:
-        return self.inbound_server.sockets[0].getsockname()
+        # Only take first 2 elements (host, port) from getsockname()
+        # IPv6 sockets return 4-tuple (host, port, flowinfo, scope_id)
+        sockname = self.inbound_server.sockets[0].getsockname()
+        return SocketParams(sockname[0], sockname[1])
 
     async def send_registration(self, remote: AsyncioProtocolProxyPeer):
         _log.debug(f"[send_registration] Attempting to register with manager at: {remote} (type={type(remote)})")

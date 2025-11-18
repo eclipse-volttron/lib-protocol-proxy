@@ -91,7 +91,10 @@ class AsyncioIPCConnector(IPCConnector):
                            f' on any port in range: {self.min_port} - {self.max_port}.')
                 break
             else:
-                self.inbound_params = SocketParams(*self.inbound_server.sockets[0].getsockname())
+                # Only take first 2 elements (host, port) from getsockname()
+                # IPv6 sockets return 4-tuple (host, port, flowinfo, scope_id)
+                sockname = self.inbound_server.sockets[0].getsockname()
+                self.inbound_params = SocketParams(sockname[0], sockname[1])
                 break
 
     async def start(self, *_, **__):
