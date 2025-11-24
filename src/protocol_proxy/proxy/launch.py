@@ -1,4 +1,5 @@
 import logging
+from os import environ
 import sys
 
 from argparse import ArgumentParser
@@ -6,9 +7,11 @@ from asyncio import iscoroutinefunction, run
 from typing import Callable
 from uuid import UUID
 
+optional_log_params = {'filename': proxy_log} if (proxy_log := environ.get('PROTOCOL_PROXY_LOG')) else {}
 logging.basicConfig(
     level=logging.DEBUG, stream=sys.stdout,
-    format='{"name": "%(name)s", "lineno": "%(lineno)d", "level": "%(levelname)s", "message": "%(message)s"}'
+    format='{"name": "%(name)s", "lineno": "%(lineno)d", "level": "%(levelname)s", "message": "%(message)s"}',
+    **optional_log_params
 )
 _log = logging.getLogger(__name__)
 
@@ -30,12 +33,16 @@ def proxy_command_parser(parser: ArgumentParser = None):
     return parser
 
 def launch(launcher_func: Callable):
-    parser = proxy_command_parser()
-    parser, proxy_runner = launcher_func(parser)
-    opts = parser.parse_args()
-    proxy_token = UUID(hex=sys.stdin.buffer.read(32).decode('utf8'))
-    manager_token = UUID(hex=sys.stdin.buffer.read(32).decode('utf8'))
-    if iscoroutinefunction(proxy_runner):
-        run(proxy_runner(token=proxy_token, manager_token=manager_token, **vars(opts)))
-    else:
-        proxy_runner(token=proxy_token, manager_token=manager_token, **vars(opts))
+    try:
+        parser = proxy_command_parser()
+        parser, proxy_runner = launcher_func(parser)
+        opts = parser.parse_args()
+        _log.info(f'Launching Proxy with parameters: {opts}')
+        proxy_token = UUID(hex=sys.stdin.buffer.read(32).decode('utf8'))
+        manager_token = UUID(hex=sys.stdin.buffer.read(32).decode('utf8'))
+        if iscoroutinefunction(proxy_runner):
+            run(proxy_runner(token=proxy_token, manager_token=manager_token, **vars(opts)))
+        else:
+            proxy_runner(token=proxy_token, manager_token=manager_token, **vars(opts))
+    except BaseException as e:
+        _log.debug(f'Proxy Launch: Launcher caught exception: {e}')
