@@ -197,7 +197,7 @@ class GeventIPCConnector(IPCConnector):
                                  f' received {len(header_bytes)} bytes: {header_bytes}')
                     return None, remaining_time
         except (OSError, Exception) as e:
-            _log.warning(f'{self.proxy_name}: Socket exception reading headers: {e}')
+            # TODO: Why is this getting triggered at end of transmissions? _log.warning(f'{self.proxy_name}: Socket exception reading headers: {e}')
             return None, remaining_time if 'remaining_time' in locals() else self.max_io_wait_seconds
 
     def _receive_socket(self, s: socket):
@@ -245,7 +245,7 @@ class GeventIPCConnector(IPCConnector):
                 peer_name = f': {s.getpeername()}.'
             except OSError:
                 peer_name = '.'
-            _log.warning(f'{self.proxy_name}: Unable to read headers from socket: {peer_name}')
+            # TODO: Why is this getting triggered at end of transmissions? _log.warning(f'{self.proxy_name}: Unable to read headers from socket: {peer_name}')
             s.close()
 
     def _send_headers(self, s: socket, data_length: int, request_id: int, response_expected: bool, method_name: str,
