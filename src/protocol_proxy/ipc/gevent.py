@@ -267,7 +267,7 @@ class GeventIPCConnector(IPCConnector):
                 peer_name = f'to {s.getpeername()}'
             except OSError:
                 peer_name = ''
-            _log.warning(f'Outbound socket to {peer_name} was ready, but no outbound message was found.')
+            # TODO: Why is this getting triggered (apparently on every send)? _log.warning(f'Outbound socket to {peer_name} was ready, but no outbound message was found.')
         elif isinstance(message.payload, AsyncResult) and not message.payload.ready():
             self.outbounds.add(s)
             _log.debug('IN SEND SOCKET, WAS ADDED BACK TO OUTBOUND BECAUSE ASYNC_RESULT WAS NOT READY.')
