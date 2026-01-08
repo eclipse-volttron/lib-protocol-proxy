@@ -44,7 +44,7 @@ class GeventIPCConnector(IPCConnector):
 
     def _setup_inbound_server(self, socket_params: SocketParams = None):
         if self.inbound_server_socket:
-            _log.debug('@@@@@@@ Using existing inbound server socket.')
+            #_log.debug('@@@@@@@ Using existing inbound server socket.')
             return
         inbound_socket: socket = socket(AF_INET, SOCK_STREAM)
         inbound_socket.setblocking(False)
@@ -152,13 +152,13 @@ class GeventIPCConnector(IPCConnector):
 
     @contextmanager
     def _non_blocking_socket(self, func, io_wait_time, *args, **kwargs):
-        _log.debug(f'NEW CALL TO _NON_BLOCKING_SOCKET: FUNC: "{func}", IO_WAIT_TIME: {io_wait_time}, ARGS: {args}, KWARGS: {kwargs}')
+        #_log.debug(f'NEW CALL TO _NON_BLOCKING_SOCKET: FUNC: "{func}", IO_WAIT_TIME: {io_wait_time}, ARGS: {args}, KWARGS: {kwargs}')
         done = False
         while not done:
             try:
-                _log.debug(f'CALLING FUNC "{func}" with ARGS: {args} and KWARGS: {kwargs}')
+                #_log.debug(f'CALLING FUNC "{func}" with ARGS: {args} and KWARGS: {kwargs}')
                 ret_val = func(*args, **kwargs)
-                _log.debug(f'RETURNING: {ret_val}')
+                #_log.debug(f'RETURNING: {ret_val}')
                 done = True
                 yield ret_val, io_wait_time
                 break
@@ -168,8 +168,8 @@ class GeventIPCConnector(IPCConnector):
                 if io_wait_time <= 0:
                     _log.info(f'Timed out after {self.max_io_wait_seconds} seconds with BlockingIOError: {e}')
                     done = True
-            finally:
-                _log.debug('IN FINALLY OF _NON_BLOCKING_SOCKET')
+            #finally:
+                #_log.debug('IN FINALLY OF _NON_BLOCKING_SOCKET')
 
     def _receive_headers(self, s: socket) -> tuple[ProtocolHeaders | None, float]:
         try:
@@ -201,7 +201,7 @@ class GeventIPCConnector(IPCConnector):
             return None, remaining_time if 'remaining_time' in locals() else self.max_io_wait_seconds
 
     def _receive_socket(self, s: socket):
-        _log.debug(f'{self.proxy_name}: IN RECEIVE SOCKET')
+        #_log.debug(f'{self.proxy_name}: IN RECEIVE SOCKET')
         headers, io_wait_time = self._receive_headers(s)
         if headers is not None and (cb_info := self.callbacks.get(headers.method_name)):
             remaining = headers.data_length
@@ -261,7 +261,7 @@ class GeventIPCConnector(IPCConnector):
                              f' (request_id: {request_id}): {e}')
 
     def _send_socket(self, s: socket):
-        _log.debug(f'{self.proxy_name}: IN SEND SOCKET')
+        #_log.debug(f'{self.proxy_name}: IN SEND SOCKET')
         if not (message := self.outbound_messages.get(s)):
             try:
                 peer_name = f'to {s.getpeername()}'
@@ -270,12 +270,12 @@ class GeventIPCConnector(IPCConnector):
             # TODO: Why is this getting triggered (apparently on every send)? _log.warning(f'Outbound socket to {peer_name} was ready, but no outbound message was found.')
         elif isinstance(message.payload, AsyncResult) and not message.payload.ready():
             self.outbounds.add(s)
-            _log.debug('IN SEND SOCKET, WAS ADDED BACK TO OUTBOUND BECAUSE ASYNC_RESULT WAS NOT READY.')
+            #_log.debug('IN SEND SOCKET, WAS ADDED BACK TO OUTBOUND BECAUSE ASYNC_RESULT WAS NOT READY.')
         else:
             payload = message.payload.get() if isinstance(message.payload, Greenlet) else message.payload
             self._send_headers(s, len(payload), message.request_id, message.response_expected, message.method_name)
             try:
-                _log.debug('REACHED SENDALL IN GEVENT IPC SEND')
+                #_log.debug('REACHED SENDALL IN GEVENT IPC SEND')
                 s.sendall(payload)  # TODO: Should we send in chunks and sleep in between?
                 if message.response_expected:
                     self.inbounds.add(s)
@@ -306,7 +306,7 @@ class GeventIPCConnector(IPCConnector):
 
     def start(self, *_, **__):
         self._setup_inbound_server(self.inbound_params)
-        _log.debug(f'{self.proxy_name} STARTED.')
+        #_log.debug(f'{self.proxy_name} STARTED.')
 
     def stop(self):
         self._stop = True

@@ -28,12 +28,12 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         return SocketParams(sockname[0], sockname[1])
 
     async def send_registration(self, remote: AsyncioProtocolProxyPeer):
-        _log.debug(f"[send_registration] Attempting to register with manager at: {remote} (type={type(remote)})")
+        _log.info(f"Attempting to register with manager at: {remote} (type={type(remote)})")
         message = self._get_registration_message()
         manager_response = await self.send(remote, message)
         success_bytes = await manager_response if isinstance(manager_response, Future) else manager_response
         success = json.loads(success_bytes.decode('utf8'))
-        _log.debug(f'{self.proxy_name} IN SEND REGISTRATION, FUTURE.RESULT() IS : {success}')
+        #_log.debug(f'{self.proxy_name} IN SEND REGISTRATION, FUTURE.RESULT() IS : {success}')
         # TODO: Implement error handling and failure (along lines of copy below from gevent version (but working):
         # tries_remaining = 2
         # if not success:

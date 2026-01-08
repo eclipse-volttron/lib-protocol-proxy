@@ -83,7 +83,7 @@ class AsyncioIPCConnector(IPCConnector):
                 next_port = next(self.unused_ports(await self._get_ip_addresses(socket_params.address)))
                 self.inbound_server = await self.loop.create_server(factory, socket_params.address, next_port,
                                                                     start_serving=True)
-                _log.debug(f'{self.proxy_name} AFTER START SERVING. Server is: {self.inbound_server}')
+                #_log.debug(f'{self.proxy_name} AFTER START SERVING. Server is: {self.inbound_server}')
             except OSError:
                 continue
             except StopIteration:
@@ -99,7 +99,7 @@ class AsyncioIPCConnector(IPCConnector):
 
     async def start(self, *_, **__):
         await self._setup_inbound_server(self.inbound_params)
-        _log.debug(f' {self.proxy_name} STARTED with INBOUND PARAMS SENT AS: {self.inbound_params}.')
+        #_log.debug(f' {self.proxy_name} STARTED with INBOUND PARAMS SENT AS: {self.inbound_params}.')
 
     async def stop(self):
         self.inbound_server.close()
@@ -185,7 +185,7 @@ class IPCProtocol(BufferedProtocol):
             self.transport.close()
 
     def connection_made(self, transport: Transport):
-        _log.debug(f"[IPCProtocol] connection_made: transport={transport}")
+        #_log.debug(f"[IPCProtocol] connection_made: transport={transport}")
         try:
             self.transport = transport
             if self.outgoing_message:

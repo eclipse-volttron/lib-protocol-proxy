@@ -33,14 +33,14 @@ class ProtocolProxyManager(IPCConnector, ABC):
         """
 
     def _setup_proxy_process_command(self, unique_remote_id: tuple, **kwargs) -> tuple:
-        _log.debug(f'@@@@@@@@@ PASSED UAI is: {unique_remote_id}')
+        #_log.debug(f'@@@@@@@@@ PASSED UAI is: {unique_remote_id}')
         unique_remote_id = self.proxy_class.get_unique_remote_id(unique_remote_id)
-        _log.debug(f'@@@@@@@@@ UAI AFTER LOOKUP is: {unique_remote_id}')
+        #_log.debug(f'@@@@@@@@@ UAI AFTER LOOKUP is: {unique_remote_id}')
         proxy_id = self.get_proxy_id(unique_remote_id)
-        _log.debug('@@@@@@@@@ PROXY ID is: {}'.format(proxy_id))
+        #_log.debug('@@@@@@@@@ PROXY ID is: {}'.format(proxy_id))
         proxy_name = str(unique_remote_id)
         if proxy_id not in self.peers:
-            _log.debug(f'@@@@@@@@@ PROXY_ID IS NOT IN PEERS. SETTING UP COMMAND.')
+            #_log.debug(f'@@@@@@@@@ PROXY_ID IS NOT IN PEERS. SETTING UP COMMAND.')
             module, func = self.proxy_class.__module__, self.proxy_class.__name__
             protocol_specific_params = [i for pair in [(f"--{k.replace('_', '-')}", v)
                                                        for k, v in kwargs.items()] for i in pair]
@@ -48,7 +48,7 @@ class ProtocolProxyManager(IPCConnector, ABC):
                        '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,
                        '--manager-port', str(self.inbound_params.port), *protocol_specific_params]
         else:
-            _log.debug(f'@@@@@@@@@ PROXY_ID IS IN PEERS. NOT SETTING UP COMMAND.')
+            #_log.debug(f'@@@@@@@@@ PROXY_ID IS IN PEERS. NOT SETTING UP COMMAND.')
             command = None
         return command, proxy_id, proxy_name
 

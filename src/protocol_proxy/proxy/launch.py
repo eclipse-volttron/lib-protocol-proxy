@@ -45,4 +45,4 @@ def launch(launcher_func: Callable):
         else:
             proxy_runner(token=proxy_token, manager_token=manager_token, **vars(opts))
     except BaseException as e:
-        _log.debug(f'Proxy Launch: Launcher caught exception: {e}')
+        _log.warning(f'Proxy Launch: Launcher caught exception: {e}')
