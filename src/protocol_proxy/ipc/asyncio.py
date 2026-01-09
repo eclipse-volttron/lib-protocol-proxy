@@ -205,8 +205,9 @@ class IPCProtocol(BufferedProtocol):
 
     def connection_lost(self, exc):
         try:
+            pass
             # _log.debug(f'{self.connector.proxy_name} -- Connection lost, exc: "{exc}"')
-            _log.debug(f'self.on_con_lost is a {type(self.on_con_lost)} with value: {self.on_con_lost}')
+            # _log.debug(f'self.on_con_lost is a {type(self.on_con_lost)} with value: {self.on_con_lost}')
             # if self.on_con_lost is not None:
             #     self.on_con_lost.set_result(True)  # TODO: What is using the on_con_lost thing?
         except Exception as e:
