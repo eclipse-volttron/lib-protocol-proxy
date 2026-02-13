@@ -1,6 +1,7 @@
 import logging
 import struct
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from gevent import select, sleep, spawn
 from gevent.event import AsyncResult
@@ -42,6 +43,9 @@ class GeventIPCConnector(IPCConnector):
         return {ai[4][0] for ai in getaddrinfo(host_name, None)}
 
     def _setup_inbound_server(self, socket_params: SocketParams = None):
+        if self.inbound_server_socket:
+            #_log.debug('@@@@@@@ Using existing inbound server socket.')
+            return
         inbound_socket: socket = socket(AF_INET, SOCK_STREAM)
         inbound_socket.setblocking(False)
         if socket_params:
@@ -73,6 +77,7 @@ class GeventIPCConnector(IPCConnector):
             _log.warning(f'{self.proxy_name}: Socket error listening on {self.inbound_params}: {e}')
         self.inbound_server_socket = inbound_socket
         self.inbounds.add(self.inbound_server_socket)
+        _log.info(f'@@@@@@@ Created new inbound server socket: {self.inbound_params}.')
         return
 
     @callback
@@ -102,8 +107,8 @@ class GeventIPCConnector(IPCConnector):
             return False
         if message.request_id is None:
             message.request_id = self.next_request_id
-        self.outbounds.add(outbound)
         self.outbound_messages[outbound] = message
+        self.outbounds.add(outbound)
         if message.response_expected:
             async_result = AsyncResult()
             self.response_results[message.request_id] = async_result
@@ -122,9 +127,12 @@ class GeventIPCConnector(IPCConnector):
             else:
                 for s in readable:  # Handle incoming sockets.
                     if s is self.inbound_server_socket:    # The server socket is ready to accept a connection
-                        client_socket, client_address = s.accept()
-                        client_socket.setblocking(0)
-                        self.inbounds.add(client_socket)
+                        try:
+                            client_socket, client_address = s.accept()
+                            client_socket.setblocking(0)
+                            self.inbounds.add(client_socket)
+                        except BlockingIOError:
+                            pass
                     else:
                         self.inbounds.discard(s)
                         spawn(self._receive_socket, s)
@@ -142,32 +150,63 @@ class GeventIPCConnector(IPCConnector):
             finally:
                 s.close()
 
-    def _receive_headers(self, s: socket) -> ProtocolHeaders | None:
+    @contextmanager
+    def _non_blocking_socket(self, func, io_wait_time, *args, **kwargs):
+        #_log.debug(f'NEW CALL TO _NON_BLOCKING_SOCKET: FUNC: "{func}", IO_WAIT_TIME: {io_wait_time}, ARGS: {args}, KWARGS: {kwargs}')
+        done = False
+        while not done:
+            try:
+                #_log.debug(f'CALLING FUNC "{func}" with ARGS: {args} and KWARGS: {kwargs}')
+                ret_val = func(*args, **kwargs)
+                #_log.debug(f'RETURNING: {ret_val}')
+                done = True
+                yield ret_val, io_wait_time
+                break
+            except BlockingIOError as e:
+                io_wait_time -= 0.1
+                sleep(0.1)
+                if io_wait_time <= 0:
+                    _log.info(f'Timed out after {self.max_io_wait_seconds} seconds with BlockingIOError: {e}')
+                    done = True
+            #finally:
+                #_log.debug('IN FINALLY OF _NON_BLOCKING_SOCKET')
+
+    def _receive_headers(self, s: socket) -> tuple[ProtocolHeaders | None, float]:
         try:
-            received = s.recv(2)
-            if len(received) == 0:
-                _log.warning(f'{self.proxy_name} received closed socket from ({s.getpeername()}.')
-                return None
-            version_num = struct.unpack('>H', received)[0]
+            with self._non_blocking_socket(s.recv, self.max_io_wait_seconds, 2) as (version_bytes, remaining_time):
+                if len(version_bytes) == 0:
+                    try:
+                        peer_name = f' from {s.getpeername()}.'
+                    except OSError:
+                        peer_name = '.'
+                    _log.warning(f'{self.proxy_name} received closed socket {peer_name}')
+                    return None, remaining_time
+                version_num = struct.unpack('>H', version_bytes)[0]
             if not (protocol := self.PROTOCOL_VERSION.get(version_num)):
-                raise NotImplementedError(f'Unknown protocol version ({version_num})'
-                                          f' received from: {s.getpeername()}')
-            header_bytes = s.recv(protocol.HEADER_LENGTH)
-            if len(header_bytes) == protocol.HEADER_LENGTH:
-                return protocol.unpack(header_bytes)
-            else:
-                _log.warning(f'Failed to read headers. Received {len(header_bytes)} bytes: {header_bytes}')
+                try:
+                    peer_name = f' received from: {s.getpeername()}.'
+                except OSError:
+                    peer_name = '.'
+                raise NotImplementedError(f'Unknown protocol version ({version_num}){peer_name}')
+            with self._non_blocking_socket(s.recv, remaining_time, protocol.HEADER_LENGTH
+                                           ) as (header_bytes, remaining_time):
+                if len(header_bytes) == protocol.HEADER_LENGTH:
+                    return protocol.unpack(header_bytes), remaining_time
+                else:
+                    _log.warning(f'Failed to unpack headers. For header length of {protocol.HEADER_LENGTH},'
+                                 f' received {len(header_bytes)} bytes: {header_bytes}')
+                    return None, remaining_time
         except (OSError, Exception) as e:
-            _log.warning(f'{self.proxy_name}: Socket exception reading headers: {e}')
+            # TODO: Why is this getting triggered at end of transmissions? _log.warning(f'{self.proxy_name}: Socket exception reading headers: {e}')
+            return None, remaining_time if 'remaining_time' in locals() else self.max_io_wait_seconds
 
     def _receive_socket(self, s: socket):
-        _log.debug(f'{self.proxy_name}: IN RECEIVE SOCKET')
-        headers = self._receive_headers(s)
+        #_log.debug(f'{self.proxy_name}: IN RECEIVE SOCKET')
+        headers, io_wait_time = self._receive_headers(s)
         if headers is not None and (cb_info := self.callbacks.get(headers.method_name)):
             remaining = headers.data_length
             buffer = b''
             done = False
-            io_wait_time = self.max_io_wait_seconds
             while not done:
                 try:
                     while chunk := s.recv(read_length := max(0, remaining if remaining < self.chunk_size else self.chunk_size)):
@@ -194,11 +233,19 @@ class GeventIPCConnector(IPCConnector):
                         s.close()
                     done = True
         elif headers:
+            try:
+                peer_name = f' from {s.getpeername()}'
+            except OSError:
+                peer_name = ''
             _log.warning(f'{self.proxy_name}: Received unknown method name: {headers.method_name}'
-                         f' from {s.getpeername()} with request ID: {headers.request_id}')
+                         f' {peer_name} with request ID: {headers.request_id}')
             s.close()
         else:
-            _log.warning(f'{self.proxy_name}: Unable to read headers from socket: {s.getpeername()}')
+            try:
+                peer_name = f': {s.getpeername()}.'
+            except OSError:
+                peer_name = '.'
+            # TODO: Why is this getting triggered at end of transmissions? _log.warning(f'{self.proxy_name}: Unable to read headers from socket: {peer_name}')
             s.close()
 
     def _send_headers(self, s: socket, data_length: int, request_id: int, response_expected: bool, method_name: str,
@@ -214,17 +261,21 @@ class GeventIPCConnector(IPCConnector):
                              f' (request_id: {request_id}): {e}')
 
     def _send_socket(self, s: socket):
-        _log.debug(f'{self.proxy_name}: IN SEND SOCKET')
+        #_log.debug(f'{self.proxy_name}: IN SEND SOCKET')
         if not (message := self.outbound_messages.get(s)):
-            _log.warning(f'Outbound socket to {s.getpeername()} was ready, but no outbound message was found.')
+            try:
+                peer_name = f'to {s.getpeername()}'
+            except OSError:
+                peer_name = ''
+            # TODO: Why is this getting triggered (apparently on every send)? _log.warning(f'Outbound socket to {peer_name} was ready, but no outbound message was found.')
         elif isinstance(message.payload, AsyncResult) and not message.payload.ready():
             self.outbounds.add(s)
-            _log.debug('IN SEND SOCKET, WAS ADDED BACK TO OUTBOUND BECAUSE ASYNC_RESULT WAS NOT READY.')
+            #_log.debug('IN SEND SOCKET, WAS ADDED BACK TO OUTBOUND BECAUSE ASYNC_RESULT WAS NOT READY.')
         else:
             payload = message.payload.get() if isinstance(message.payload, Greenlet) else message.payload
             self._send_headers(s, len(payload), message.request_id, message.response_expected, message.method_name)
             try:
-                _log.debug('REACHED SENDALL IN GEVENT IPC SEND')
+                #_log.debug('REACHED SENDALL IN GEVENT IPC SEND')
                 s.sendall(payload)  # TODO: Should we send in chunks and sleep in between?
                 if message.response_expected:
                     self.inbounds.add(s)
@@ -255,7 +306,7 @@ class GeventIPCConnector(IPCConnector):
 
     def start(self, *_, **__):
         self._setup_inbound_server(self.inbound_params)
-        _log.debug(f'{self.proxy_name} STARTED.')
+        #_log.debug(f'{self.proxy_name} STARTED.')
 
     def stop(self):
         self._stop = True

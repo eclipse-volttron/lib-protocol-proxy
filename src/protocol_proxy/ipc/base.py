@@ -105,8 +105,12 @@ class IPCConnector(metaclass=ABCMeta):
         return next(self._request_id)
 
     def register_callback(self, cb_method, method_name, provides_response=False, timeout=30.0):
-        _log.info(f'{self.proxy_name} registered callback: {method_name}')
-        self.callbacks[method_name] = ProtocolProxyCallback(cb_method, method_name, provides_response, timeout=timeout)
+        if not self.callbacks.get(method_name):
+            _log.info(f'{self.proxy_name} registered callback: {method_name}')
+            self.callbacks[method_name] = ProtocolProxyCallback(cb_method, method_name, provides_response,
+                                                                timeout=timeout)
+        else:
+            _log.info(f'{self.proxy_name} confirmed callback: {method_name} is registered.')
 
     @abstractmethod
     def start(self, *_, **__):

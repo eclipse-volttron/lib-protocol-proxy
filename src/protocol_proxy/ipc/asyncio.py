@@ -83,7 +83,7 @@ class AsyncioIPCConnector(IPCConnector):
                 next_port = next(self.unused_ports(await self._get_ip_addresses(socket_params.address)))
                 self.inbound_server = await self.loop.create_server(factory, socket_params.address, next_port,
                                                                     start_serving=True)
-                _log.debug(f'{self.proxy_name} AFTER START SERVING. Server is: {self.inbound_server}')
+                #_log.debug(f'{self.proxy_name} AFTER START SERVING. Server is: {self.inbound_server}')
             except OSError:
                 continue
             except StopIteration:
@@ -91,12 +91,15 @@ class AsyncioIPCConnector(IPCConnector):
                            f' on any port in range: {self.min_port} - {self.max_port}.')
                 break
             else:
-                self.inbound_params = SocketParams(*self.inbound_server.sockets[0].getsockname())
+                # Only take first 2 elements (host, port) from getsockname()
+                # IPv6 sockets return 4-tuple (host, port, flowinfo, scope_id)
+                sockname = self.inbound_server.sockets[0].getsockname()
+                self.inbound_params = SocketParams(sockname[0], sockname[1])
                 break
 
     async def start(self, *_, **__):
         await self._setup_inbound_server(self.inbound_params)
-        _log.debug(f' {self.proxy_name} STARTED with INBOUND PARAMS SENT AS: {self.inbound_params}.')
+        #_log.debug(f' {self.proxy_name} STARTED with INBOUND PARAMS SENT AS: {self.inbound_params}.')
 
     async def stop(self):
         self.inbound_server.close()
@@ -182,7 +185,7 @@ class IPCProtocol(BufferedProtocol):
             self.transport.close()
 
     def connection_made(self, transport: Transport):
-        _log.debug(f"[IPCProtocol] connection_made: transport={transport}")
+        #_log.debug(f"[IPCProtocol] connection_made: transport={transport}")
         try:
             self.transport = transport
             if self.outgoing_message:
@@ -202,8 +205,9 @@ class IPCProtocol(BufferedProtocol):
 
     def connection_lost(self, exc):
         try:
+            pass
             # _log.debug(f'{self.connector.proxy_name} -- Connection lost, exc: "{exc}"')
-            _log.debug(f'self.on_con_lost is a {type(self.on_con_lost)} with value: {self.on_con_lost}')
+            # _log.debug(f'self.on_con_lost is a {type(self.on_con_lost)} with value: {self.on_con_lost}')
             # if self.on_con_lost is not None:
             #     self.on_con_lost.set_result(True)  # TODO: What is using the on_con_lost thing?
         except Exception as e:

@@ -28,6 +28,7 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
         def wait_for_peer_registration():
             while peer.socket_params is None:
                 sleep(0.1)
+
         try:
             with peer.ready:
                 with_timeout(timeout, wait_for_peer_registration)
@@ -41,10 +42,12 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             del self.peers[peer.proxy_id]
 
     def get_proxy(self, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
+        #_log.debug('@@@@@@@ IN GET_PROXY @@@@@@@')
         command, proxy_id, proxy_name = self._setup_proxy_process_command(unique_remote_id, **kwargs) # , proxy_env
+        #_log.debug(f'@@@@@@@ AFTER SETUP_PROXY_PROCESS_COMMAND: {(command, proxy_id, proxy_name)} @@@@@@@')
         if command:
             proxy_process = Popen(command, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-            _log.info("proxy %s has PID %s", self.proxy_name, proxy_process.pid)
+            _log.info(f'proxy {proxy_name} has PID {proxy_process.pid}')
             spawn(self.log_subprocess_output, proxy_process.stdout)
             spawn(self.log_subprocess_output, proxy_process.stderr)
             # TODO: Ensure that logging as implemented fits with VOLTTRON logging once that is fixed..
@@ -59,7 +62,8 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
                                                            token=new_peer_token)
             atexit.register(self._cleanup_proxy_process, proxy_process)
             # Do NOT send to the proxy until it has registered and socket_params is set!
-            _log.debug(f"PPM: Proxy {proxy_id} created, waiting for registration before sending.")
+            _log.info(f"PPM: Proxy {proxy_id} created, waiting for registration before sending.")
+        #_log.debug(f'@@@@@@@ GET_PROXY WILL RETURN PEER: {self.peers[proxy_id]} @@@@@@@')
         return self.peers[proxy_id]
 
     def log_subprocess_output(self, stream: IO[bytes]):

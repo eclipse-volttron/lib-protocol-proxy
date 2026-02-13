@@ -20,7 +20,7 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
             4. Create a ProtocolProxyPeer subclass for the manager and store it in self.peers.
             5. Call send_registration asynchronously in their constructor after super calls.
         """
-        _log.debug('PP: IN INIT.')
+        #_log.debug('PP: IN INIT.')
         super(ProtocolProxy, self).__init__(**kwargs)
         self.registration_retry_delay: float = registration_retry_delay
         self.manager_params = SocketParams(manager_address, manager_port)
