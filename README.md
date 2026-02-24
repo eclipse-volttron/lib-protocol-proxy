@@ -4,7 +4,7 @@
 [![Passing?](https://github.com/eclipse-volttron/lib-protocol-proxy/actions/workflows/run-tests.yml/badge.svg)](https://github.com/eclipse-volttron/lib-protocol-proxy/actions/workflows/run-tests.yml)
 [![pypi version](https://img.shields.io/pypi/v/protocol-proxy.svg)](https://pypi.org/project/protocol-proxy/)
 
-This library provides the user with the ability to automatically deploy and manager proxy processes for handling
+This library provides the user with the ability to automatically deploy and manage proxy processes for handling
 network communication with remote devices using various protocols. A proxy to each remote peer is established in 
 a separate process from the managing application. A manager class handles socket communication between the proxy
 subprocess and its owner. Individual protocols are implemented as plugins to this library. Integration with 
@@ -28,7 +28,7 @@ pip install lib-protocol-proxy
 ```
 
 Protocol Proxy plugins should include "protocol-proxy" as a requirement, so users of existing
-plugins are encouraged to instead install the plugin for that pacakge directly.
+plugins are encouraged to instead install the plugin for that package directly.
 
 # Development
 This library is maintained by the VOLTTRON Development Team.
