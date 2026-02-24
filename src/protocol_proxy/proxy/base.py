@@ -2,6 +2,8 @@ import abc
 import json
 import logging
 
+from importlib import import_module
+from pkgutil import iter_modules
 from uuid import UUID
 
 from ..ipc import IPCConnector, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
@@ -25,6 +27,7 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         self.registration_retry_delay: float = registration_retry_delay
         self.manager_params = SocketParams(manager_address, manager_port)
         self.manager = manager_id
+        self.apply_plugins()
 
 
     @abc.abstractmethod
@@ -41,6 +44,24 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def send_registration(self, remote: ProtocolProxyPeer) -> ProtocolProxyMessage:
         """Send a registration message to the remote manager."""
+
+    def apply_plugins(self):
+        try:
+            installed_plugins = import_module(f'protocol_proxy.plugins.protocol.{self.__module__.split('.')[2]}')
+            for m in iter_modules(installed_plugins.__path__, installed_plugins.__name__ + '.'):
+                if hasattr(m, 'name') and m.name.split('.')[-1]:
+                    module = import_module(m.name)
+                    if hasattr(module, 'INTERFACE_PLUGINS'):
+                        for interface_plugin in module.INTERFACE_PLUGINS:
+                            interface_plugin.plug_into(self)
+        except ModuleNotFoundError:
+            return
+        except AttributeError as e:
+            _log.warning(f'Unable to load plugin "{m.name}: {e}')
+        except IndexError as e:
+            _log.warning('Unable to determine protocol_type to load plugins.')
+        except Exception as e:
+            _log.warning(f'Unexpected error loading plugins: {e}')
 
     def _get_registration_message(self):
         # _log.debug(f'{self.proxy_name}: IN GET REGISTRATION MESSAGE')
