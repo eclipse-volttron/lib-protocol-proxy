@@ -47,12 +47,12 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
 
     def apply_plugins(self):
         try:
-            installed_plugins = import_module(f'protocol_proxy.plugins.protocol.{self.__module__.split('.')[2]}')
+            installed_plugins = import_module(f'protocol_proxy.plugins.protocol.{self.__module__.split(".")[2]}')
             for m in iter_modules(installed_plugins.__path__, installed_plugins.__name__ + '.'):
                 if hasattr(m, 'name') and m.name.split('.')[-1]:
                     module = import_module(m.name)
-                    if hasattr(module, 'INTERFACE_PLUGINS'):
-                        for interface_plugin in module.INTERFACE_PLUGINS:
+                    if hasattr(module, 'PROXY_PLUGINS'):
+                        for interface_plugin in module.PROXY_PLUGINS:
                             interface_plugin.plug_into(self)
         except ModuleNotFoundError:
             return

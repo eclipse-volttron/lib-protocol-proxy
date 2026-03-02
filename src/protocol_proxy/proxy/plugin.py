@@ -42,7 +42,7 @@ class ProxyPlugin:
                 kwargs['provides_response'] = provides_response
             if timeout := params.get('timeout'):
                 kwargs['timeout'] = timeout
-            proxy.register_callback(getattr(cls, params['method_name']), api_name, **kwargs)
+            proxy.register_callback(MethodType(getattr(cls, params['method_name']), proxy), api_name, **kwargs)
 
     @staticmethod
     def _add_overridden(func, overridden_method):
