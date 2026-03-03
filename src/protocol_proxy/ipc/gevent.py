@@ -107,7 +107,7 @@ class GeventIPCConnector(IPCConnector):
             return False
         if message.request_id is None:
             message.request_id = self.next_request_id
-        self.outbound_messages[outbound] = message
+        self.outbound_messages[outbound] = message  # TODO: Should there be a check for empty messages before this and next lines?
         self.outbounds.add(outbound)
         if message.response_expected:
             async_result = AsyncResult()

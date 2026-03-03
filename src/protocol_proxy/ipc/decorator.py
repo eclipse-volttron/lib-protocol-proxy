@@ -1,6 +1,6 @@
 import logging
 
-from typing import Any
+from functools import wraps
 
 _log = logging.getLogger(__name__)
 
@@ -8,6 +8,7 @@ _log = logging.getLogger(__name__)
 # TODO: Do we need an Asyncio version of this?
 # TODO: Did this work with the AsyncResult removed (just returns, possibly within greenlet)?
 def callback(func):
+    @wraps(func)
     def verify(self, ipc, headers, raw_message: bytes):
         if peer := ipc.peers.get(headers.sender_id):
             if headers.sender_token == peer.token:
@@ -18,4 +19,19 @@ def callback(func):
         else:
             _log.warning(f'Request from unknown party: {headers.sender_id}')
             return None
+    return verify
+
+def async_callback(func):
+    @wraps(func)
+    async def verify(self, ipc, headers, raw_message: bytes):
+        if peer := ipc.peers.get(headers.sender_id):
+            if headers.sender_token == peer.token:
+                return await func(self, headers, raw_message)
+            else:
+                _log.warning(f'Unable to authenticate caller: {headers.sender_id}')
+                return None
+        else:
+            _log.warning(f'Request from unknown party: {headers.sender_id}')
+            return None
+
     return verify
