@@ -42,9 +42,13 @@ class ProtocolProxyManager(IPCConnector, ABC):
         if proxy_id not in self.peers:
             #_log.debug(f'@@@@@@@@@ PROXY_ID IS NOT IN PEERS. SETTING UP COMMAND.')
             module, func = self.proxy_class.__module__, self.proxy_class.__name__
-            protocol_specific_params = [i for pair in [(f"--{k.replace('_', '-')}", v)
+            kwargs = {k: v for k, v in kwargs.items() if k != 'manager_callbacks' and v is not None}
+            protocol_specific_params = [i for pair in [(f"--{k.replace('_', '-')}", str(v))
                                                        for k, v in kwargs.items()] for i in pair]
-            command = [sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
+            # Launched through the generic entry point so the proxy module is imported exactly once (see launch.main).
+            entry_options = ['--gevent'] if getattr(self.proxy_class, 'PATCH_GEVENT', False) else []
+            command = [sys.executable, '-m', 'protocol_proxy.proxy', *entry_options, f'{module}:{func}',
+                       '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
                        '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,
                        '--manager-port', str(self.inbound_params.port), *protocol_specific_params]
         else:
@@ -68,7 +72,7 @@ class ProtocolProxyManager(IPCConnector, ABC):
         if len(unique_remote_id) >= 1:
             likely_module = unique_remote_id[0]
             try:
-                manager = cls.get_manager(likely_module, kwargs.get('manager_callbacks'))
+                manager = cls.get_manager(likely_module, kwargs.pop('manager_callbacks', None))
                 return manager, manager.get_proxy(unique_remote_id, **kwargs)
             except (ImportError, ValueError) as e:
                 _log.warning(f'Unable to find a manager for get_proxy call: {e}')

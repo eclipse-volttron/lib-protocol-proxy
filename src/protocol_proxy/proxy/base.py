@@ -1,9 +1,11 @@
 import abc
 import json
 import logging
+import sys
 
 from importlib import import_module
 from pkgutil import iter_modules
+from typing import ClassVar
 from uuid import UUID
 
 from ..ipc import IPCConnector, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
@@ -13,6 +15,13 @@ _log = logging.getLogger(__name__)
 
 # noinspection PyMissingConstructor
 class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
+    # Name of a module-level function, in the same module as the subclass, which adds protocol-specific command-line
+    # options: ``(ArgumentParser) -> (ArgumentParser, runner)`` where ``runner(**options)`` creates and starts the
+    # proxy. None means the proxy takes no options and is launched as ``cls(**options).start()``.
+    LAUNCHER: ClassVar[str | None] = None
+    # Whether the proxy process must be gevent monkey-patched before this module is imported.
+    PATCH_GEVENT: ClassVar[bool] = False
+
     def __init__(self, *, manager_address: str, manager_port: int, manager_id: UUID,
                  registration_retry_delay: float = 20.0, **kwargs):
         """NOTE: Proxy implementations MUST:
@@ -46,8 +55,12 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         """Send a registration message to the remote manager."""
 
     def apply_plugins(self):
+        module_name = type(self).__module__
+        if module_name == '__main__':    # Running via "python -m"; runpy records the real name in __spec__.
+            spec = getattr(sys.modules.get('__main__'), '__spec__', None)
+            module_name = spec.name if spec else ''
         try:
-            installed_plugins = import_module(f'protocol_proxy.plugins.protocol.{self.__module__.split(".")[2]}')
+            installed_plugins = import_module(f'protocol_proxy.plugins.protocol.{module_name.split(".")[2]}')
             for m in iter_modules(installed_plugins.__path__, installed_plugins.__name__ + '.'):
                 if hasattr(m, 'name') and m.name.split('.')[-1]:
                     module = import_module(m.name)
@@ -58,8 +71,8 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
             return
         except AttributeError as e:
             _log.warning(f'Unable to load plugin "{m.name}: {e}')
-        except IndexError as e:
-            _log.warning('Unable to determine protocol_type to load plugins.')
+        except IndexError:
+            _log.warning(f'Unable to determine protocol_type to load plugins (module: "{module_name}").')
         except Exception as e:
             _log.warning(f'Unexpected error loading plugins: {e}')
 
