@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 
 from protocol_proxy.ipc import SocketParams
-from protocol_proxy.manager.base import ProtocolProxyManager
+from protocol_proxy.logs import record_from_line
 import importlib
 
 launch_module = importlib.import_module('protocol_proxy.proxy.launch')
@@ -24,25 +24,53 @@ def test_str2bool():
         str2bool('maybe')
 
 
-def test_json_formatter_roundtrips_quotes_through_manager_parser(caplog):
-    record = logging.LogRecord('some.proxy', logging.WARNING, __file__, 12, 'Namespace(name="x", y=\'z\')', None, None)
+def test_json_formatter_roundtrips_quotes_through_manager_reader():
+    record = logging.LogRecord('some.proxy', logging.WARNING, __file__, 12, 'Namespace(name="x", y=%r)', ('z',), None)
     line = JsonLineFormatter().format(record)
     parsed = json.loads(line)
-    assert parsed == {'name': 'some.proxy', 'lineno': 12, 'level': 'WARNING', 'message': 'Namespace(name="x", y=\'z\')'}
-    with caplog.at_level(logging.DEBUG):
-        ProtocolProxyManager.log_subprocess_output_line(line.encode('utf8'))
-    assert caplog.records[-1].name == 'some.proxy'
-    assert caplog.records[-1].levelno == logging.WARNING
-    assert 'Namespace(name="x"' in caplog.records[-1].getMessage()
+    assert parsed['name'] == 'some.proxy' and parsed['levelno'] == logging.WARNING and parsed['levelname'] == 'WARNING'
+    assert parsed['lineno'] == 12 and parsed['pathname'] == __file__ and parsed['msg'] == 'Namespace(name="x", y=\'z\')'
+    assert 'args' not in parsed and 'exc_info' not in parsed and parsed['process'] == record.process
+    rebuilt = record_from_line(line.encode('utf8'), logger_name='protocol_proxy.proxies.P.n')
+    assert rebuilt.name == 'protocol_proxy.proxies.P.n' and rebuilt.remote_name == 'some.proxy'
+    assert rebuilt.levelno == logging.WARNING and rebuilt.getMessage() == 'Namespace(name="x", y=\'z\')'
+    assert rebuilt.lineno == 12 and rebuilt.created == record.created
 
 
-def test_read_tokens():
-    a, b = uuid4(), uuid4()
+def test_read_tokens_and_optional_key():
+    a, b, key = uuid4(), uuid4(), bytes(range(32))
     with mock.patch.object(launch_module.sys, 'stdin', mock.Mock(buffer=io.BytesIO((a.hex + b.hex).encode()))):
-        assert _read_tokens() == (a, b)
+        assert _read_tokens() == (a, b, None, None)
     with mock.patch.object(launch_module.sys, 'stdin', mock.Mock(buffer=io.BytesIO(b'short'))):
         with pytest.raises(ValueError):
             _read_tokens()
+    with mock.patch.object(launch_module.sys, 'stdin', mock.Mock(buffer=io.BytesIO((a.hex + b.hex + key.hex()).encode()))):
+        assert _read_tokens(encrypt=True) == (a, b, key, None)
+    with mock.patch.object(launch_module.sys, 'stdin', mock.Mock(buffer=io.BytesIO((a.hex + b.hex).encode()))):
+        with pytest.raises(ValueError, match='no 32-byte key'):
+            _read_tokens(encrypt=True)                              # --encrypt without a key is an error
+    from protocol_proxy.tls import TlsMaterial
+    material = TlsMaterial(ca='CA', cert='CERT', key='KEY')
+    with mock.patch.object(launch_module.sys, 'stdin', mock.Mock(buffer=io.BytesIO((a.hex + b.hex + key.hex()).encode()
+                                                                                    + material.to_line()))):
+        assert _read_tokens(encrypt=True, ipc_tls=True) == (a, b, key, material)
+    with mock.patch.object(launch_module.sys, 'stdin', mock.Mock(buffer=io.BytesIO((a.hex + b.hex).encode()))):
+        with pytest.raises(ValueError, match='no TLS material'):
+            _read_tokens(ipc_tls=True)
+
+
+def test_launch_passes_the_key_to_the_runner_when_encrypting():
+    seen = {}
+
+    def runner(**kwargs):
+        seen.update(kwargs)
+        return 0
+    a, b, key = uuid4(), uuid4(), bytes(range(32))
+    stdin = io.BytesIO((a.hex + b.hex + key.hex()).encode())
+    code, *_ = _launch_with(BASE_ARGS + ['--encrypt', 'True'], runner, stdin=stdin)
+    assert code == 0 and seen['key'] == key and seen['encrypt'] is True
+    code, *_ = _launch_with(BASE_ARGS + ['--encrypt', 'True'], runner, stdin=io.BytesIO((a.hex + b.hex).encode()))
+    assert code == 1                                                # no key: the launch fails, nothing runs
 
 
 def test_parser_defaults_and_bool_handling():

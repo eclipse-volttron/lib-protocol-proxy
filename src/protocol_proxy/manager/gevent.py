@@ -3,11 +3,11 @@ import logging
 import os
 
 from abc import ABC
-from gevent import sleep, spawn, with_timeout
+from gevent import joinall, sleep, spawn, Greenlet
 from gevent.subprocess import Popen, PIPE
 from gevent.timeout import Timeout
 from uuid import uuid4
-from typing import IO, Type
+from typing import Type
 
 from ..ipc import callback, ProtocolHeaders, ProtocolProxyPeer
 from ..ipc.gevent import GeventIPCConnector, GeventProtocolProxyPeer
@@ -18,75 +18,170 @@ _log = logging.getLogger(__name__)
 
 
 class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
-    def __init__(self, proxy_class: Type[ProtocolProxy], **kwargs):
+    def __init__(self, proxy_class: Type[ProtocolProxy] | None = None, **kwargs):
         super().__init__(proxy_class=proxy_class, **kwargs)
+        self._heartbeat: Greenlet | None = None
+
+    # ---- heartbeat -----------------------------------------------------------------------------------------------
+    def start_heartbeat(self):
+        """Start pinging registered peers on the heartbeat interval (idempotent; a no-op when the interval is 0)."""
+        if self.heartbeat_interval and (self._heartbeat is None or self._heartbeat.dead):
+            self._heartbeat = spawn(self._heartbeat_loop)
+
+    def _heartbeat_loop(self):
+        while True:
+            sleep(self.heartbeat_interval)
+            for peer in self.peers_to_ping():
+                spawn(self._ping, peer)
+
+    def _ping(self, peer: GeventProtocolProxyPeer):
+        try:
+            result = self.send(peer, self.ping_message())
+            if result is False:
+                raise ConnectionError('send refused')
+            reply = result.get(timeout=self.heartbeat_timeout)
+        except Timeout:
+            lost = self.heartbeat_missed(peer, f'no reply within {self.heartbeat_timeout} s')
+        except Exception as e:
+            lost = self.heartbeat_missed(peer, str(e))
+        else:
+            self.heartbeat_answered(peer, reply)
+            return
+        if lost and self.peers.get(peer.proxy_id) is peer:
+            self._lose_peer(peer, f'missed {peer.missed} heartbeats')
 
     def wait_peer_registered(self, peer, timeout, func=None, *args, **kwargs):
         """ Waits for a peer to be ready, optionally calling a function when it is.
             If the peer does not register within the timeout, it is removed and a warning is logged.
         """
-        def wait_for_peer_registration():
-            while peer.socket_params is None:
-                sleep(0.1)
+        with peer.ready:
+            # Woken by handle_peer_registration (mark_registered); a peer whose address was set directly is ready now.
+            if peer.socket_params is None and not peer.registered.wait(timeout):
+                _log.warning(f"Peer {peer.proxy_id} did not register within {timeout} seconds. Removing peer.")
+                self._lose_peer(peer, f'did not register within {timeout} seconds')
+                return
+        if func:
+            try:
+                func(*args, **kwargs)
+            except Exception as e:
+                # The peer itself is fine; only this caller's follow-up failed. Keep the peer for everyone else.
+                _log.error(f"Error running post-registration function for peer {peer.proxy_id}: {e}")
 
-        try:
-            with peer.ready:
-                with_timeout(timeout, wait_for_peer_registration)
-                if func:
-                    func(*args, **kwargs)
-        except Timeout:
-            _log.warning(f"Peer {peer.proxy_id} did not register within {timeout} seconds. Removing peer.")
+    def _dial_until_registered(self, peer: GeventProtocolProxyPeer, interval: float = 1.0):
+        """For a proxy that cannot dial in: open the persistent connection to it and PING until it has registered
+        over that connection (it adopts the connection once the frame authenticates as this manager)."""
+        while self.peers.get(peer.proxy_id) is peer and not peer.registered.is_set():
+            try:
+                result = self._send(peer, self.ping_message())     # not send(): the registration waiter holds ready
+                if result is not False:
+                    result.get(timeout=self.heartbeat_timeout)
+                peer.registered.wait(interval)
+            except Exception as e:
+                _log.debug(f'PPM: {peer.name} not reachable yet at {peer.dial_params}: {e}')
+                sleep(interval)
+
+    def _lose_peer(self, peer: ProtocolProxyPeer, reason: str):
+        """Forget a peer and stop its process if it is still running, then tell the peer-lost listeners."""
+        if self.peers.get(peer.proxy_id) is peer:
             del self.peers[peer.proxy_id]
-        except Exception as e:
-            _log.error(f"Error while waiting for peer {peer.proxy_id} to be ready: {e}. Removing peer.")
-            del self.peers[peer.proxy_id]
+        if (process := getattr(peer, 'process', None)) is not None and process.poll() is None:
+            spawn(self._cleanup_proxy_process, process)
+        self._notify_peer_lost(peer, reason)
+
+    def _watch_proxy_process(self, proxy_id, peer: GeventProtocolProxyPeer):
+        """Wait for a launched proxy process to exit; when it does, drop its peer (if it is still the current one for
+        this proxy id) so the next get_proxy relaunches, and tell the listeners so they can re-register."""
+        returncode = peer.process.wait()
+        if self.peers.get(proxy_id) is peer:
+            _log.warning(f'PPM: {self.manifest.name} process {peer.process.pid} (proxy {proxy_id}) exited with'
+                         f' code {returncode}. It will be relaunched on the next request for it.')
+            self._lose_peer(peer, f'process exited with code {returncode}')
+        else:
+            _log.debug(f'PPM: {self.manifest.name} process {peer.process.pid} (proxy {proxy_id}) exited with'
+                       f' code {returncode} after its peer was already replaced or removed.')
 
     def get_proxy(self, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
         #_log.debug('@@@@@@@ IN GET_PROXY @@@@@@@')
         command, proxy_id, proxy_name = self._setup_proxy_process_command(unique_remote_id, **kwargs) # , proxy_env
         #_log.debug(f'@@@@@@@ AFTER SETUP_PROXY_PROCESS_COMMAND: {(command, proxy_id, proxy_name)} @@@@@@@')
         if command:
-            proxy_process = Popen(command, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+            # The peer is registered before the process is launched: launching yields to other greenlets, and a
+            # concurrent get_proxy for the same key must find this peer rather than launch a second process.
+            dial = self.dial_target(kwargs)
+            peer = GeventProtocolProxyPeer(process=None, proxy_id=proxy_id, token=uuid4(), name=proxy_name,
+                                           persistent=True if dial else self.peer_policy(kwargs), dial_params=dial,
+                                           key=self.new_key() if self.peer_encrypted(kwargs) else None,
+                                           tls=self.peer_tls(kwargs))
+            material = self.tls_material_for(proxy_id) if peer.tls else None
+            self.peers[proxy_id] = peer
+            try:
+                proxy_process = Popen(command, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=self.proxy_environment())
+            except Exception:
+                if self.peers.get(proxy_id) is peer:
+                    del self.peers[proxy_id]
+                raise
+            peer.process = proxy_process
             _log.info(f'proxy {proxy_name} has PID {proxy_process.pid}')
-            spawn(self.log_subprocess_output, proxy_process.stdout)
-            spawn(self.log_subprocess_output, proxy_process.stderr)
-            # TODO: Ensure that logging as implemented fits with VOLTTRON logging once that is fixed..
+            logger = self.proxy_logger(proxy_name)
+            for stream_name in ('stdout', 'stderr'):
+                spawn(self.log_subprocess_output, getattr(proxy_process, stream_name), logger, stream_name,
+                      proxy_process.pid, proxy_name)
             _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
-            new_peer_token = uuid4()
-            proxy_process.stdin.write(new_peer_token.hex.encode())
+            proxy_process.stdin.write(peer.token.hex.encode())
             proxy_process.stdin.write(self.token.hex.encode())
+            if peer.key is not None:
+                proxy_process.stdin.write(peer.key.hex().encode())
+            if material is not None:
+                proxy_process.stdin.write(material.to_line())
             proxy_process.stdin.flush()
             proxy_process.stdin.close()
             proxy_process.stdin = open(os.devnull)
-            self.peers[proxy_id] = GeventProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id,
-                                                           token=new_peer_token)
             atexit.register(self._cleanup_proxy_process, proxy_process)
+            spawn(self._watch_proxy_process, proxy_id, peer)
+            if dial is not None:
+                spawn(self._dial_until_registered, peer)
+            self.start_heartbeat()
             # Do NOT send to the proxy until it has registered and socket_params is set!
             _log.info(f"PPM: Proxy {proxy_id} created, waiting for registration before sending.")
         #_log.debug(f'@@@@@@@ GET_PROXY WILL RETURN PEER: {self.peers[proxy_id]} @@@@@@@')
         return self.peers[proxy_id]
 
-    def log_subprocess_output(self, stream: IO[bytes]):
-        """Reads lines from a pipe and logs them."""
-        for raw_line in iter(stream.readline, b''):
-            self.log_subprocess_output_line(raw_line)
-
     @callback
     def handle_peer_registration(self, headers: ProtocolHeaders, raw_message: bytes):
         return super().handle_peer_registration(headers, raw_message)
 
+    @callback
+    def handle_log(self, headers: ProtocolHeaders, raw_message: bytes):
+        return super().handle_log(headers, raw_message)
+
+    def stop(self, terminate_proxies: bool = True, timeout: float = 5.0):
+        """Stop the manager and, by default, the proxies it launched: SIGTERM each process, SIGKILL after ``timeout``
+        (the same clean-up the manager host's exit performs), so a stopped manager leaves no orphans. A caller that
+        hands its processes over (for example to another manager) passes ``terminate_proxies=False``."""
+        if self._heartbeat is not None:
+            self._heartbeat.kill(block=False)
+            self._heartbeat = None
+        super().stop()
+        if terminate_proxies:
+            processes = [peer.process for peer in self.peers.values()
+                         if getattr(peer, 'process', None) is not None and peer.process.poll() is None]
+            joinall([spawn(self._cleanup_proxy_process, process, timeout) for process in processes], timeout=2 * timeout + 1)
+
     def _cleanup_proxy_process(self, process: Popen, timeout: float = 5.0):
         # TODO: Waits may block. Check this and change to a method that yields if needed.
         if process.poll() is None:
+            self.stopping_pids.add(process.pid)
             try:
-                _log.info(f'Terminating {self.proxy_class.__name__} with PID: {process.pid}')
+                _log.info(f'Terminating {self.manifest.name} with PID: {process.pid}')
                 process.terminate()
                 if process.wait(timeout=timeout) is None:
-                    _log.info(f'Killing {self.proxy_class.__name__} with PID: {process.pid}')
+                    _log.info(f'Killing {self.manifest.name} with PID: {process.pid}')
                     process.kill()
                     if process.wait(timeout=timeout) is None:
-                        _log.warning(f'Failed to stop {self.proxy_class.__name__} with PID: {process.pid}')
+                        _log.warning(f'Failed to stop {self.manifest.name} with PID: {process.pid}')
             except Timeout:
                 process.kill()
             except Exception as e:
                 _log.warning(f'Exception encountered attempting to terminate proxy process ({process.pid}): {e}')
+            finally:
+                self.stopping_pids.discard(process.pid)

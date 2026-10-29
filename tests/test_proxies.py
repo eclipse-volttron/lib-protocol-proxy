@@ -1,28 +1,28 @@
 import asyncio
 import json
+import os
+import signal
 from types import SimpleNamespace
 from unittest import mock
 from uuid import uuid4
 
+import gevent
 from gevent.event import AsyncResult
 
 from protocol_proxy.ipc import callback, async_callback, ProtocolProxyPeer, SocketParams
 from protocol_proxy.ipc.asyncio import AsyncioIPCConnector
 from protocol_proxy.ipc.gevent import GeventIPCConnector
 from protocol_proxy.proxy.asyncio import AsyncioProtocolProxy
+from protocol_proxy.proxy import ProtocolProxy
 from protocol_proxy.proxy.gevent import GeventProtocolProxy
 
 
 class GeventDummy(GeventProtocolProxy):
-    @classmethod
-    def get_unique_remote_id(cls, unique_remote_id):
-        return unique_remote_id
+    pass
 
 
 class AsyncioDummy(AsyncioProtocolProxy):
-    @classmethod
-    def get_unique_remote_id(cls, unique_remote_id):
-        return unique_remote_id
+    pass
 
 
 def gevent_proxy():
@@ -125,7 +125,8 @@ def test_asyncio_run_callback_accepts_sync_and_async_callbacks():
         connector = mock.Mock(proxy_name='c', PROTOCOL_VERSION={1: mock.Mock(HEADER_LENGTH=10)})
         protocol = IPCProtocol(connector=connector)
         protocol.transport = mock.Mock()
-        protocol._message_to_bytes = lambda message: message.payload
+        protocol.transport.is_closing.return_value = False
+        protocol._message_to_bytes = lambda message, **kwargs: message.payload
         headers = SimpleNamespace(method_name='M', request_id=1)
 
         def sync_cb(conn, hdrs, data):
@@ -143,4 +144,144 @@ def test_asyncio_run_callback_accepts_sync_and_async_callbacks():
         info = SimpleNamespace(method=raising, provides_response=True, timeout=1)
         await protocol._run_callback(info, headers, memoryview(b'x'))
         assert json.loads(protocol.transport.write.call_args.args[0])['status'] == 'error'
+    asyncio.run(main())
+
+
+def test_manager_alive_follows_the_parent_pid():
+    p = gevent_proxy()
+    assert p.manager_alive()
+    with mock.patch('protocol_proxy.proxy.base.os.getppid', return_value=1):
+        assert not p.manager_alive()
+
+
+def test_gevent_proxy_stops_when_the_manager_disappears():
+    p = gevent_proxy()
+    p.manager_watch_interval = 0.01
+    with mock.patch.object(p, 'manager_alive', side_effect=[True, True, False]):
+        p._watch_manager()
+    assert p._stop and p._manager_lost
+
+
+def test_asyncio_start_returns_when_the_manager_disappears():
+    async def main():
+        p = AsyncioDummy(proxy_id=uuid4(), token=uuid4(), manager_address='127.0.0.1', manager_port=1,
+                         manager_id=uuid4(), manager_token=uuid4(), manager_watch_interval=0.01)
+        p.inbound_params = SocketParams('127.0.0.1', 0)
+        with mock.patch.object(p, 'send_registration', mock.AsyncMock(return_value=True)), \
+             mock.patch.object(p, 'manager_alive', side_effect=[True, False]):
+            await asyncio.wait_for(p.start(), 2)        # serve_forever ends instead of raising CancelledError
+        assert p._manager_lost and not p.inbound_server.is_serving()
+    asyncio.run(main())
+
+
+def test_gevent_sigterm_stops_the_proxy_and_run_returns_zero():
+    """The manager stops a proxy with SIGTERM; the proxy stops its loops and exits normally instead of dying."""
+    p = gevent_proxy()
+    p.inbound_params = SocketParams('127.0.0.1', 0)
+
+    def fake_registration(remote):
+        p.registered = True
+        return True
+    with mock.patch.object(p, 'send_registration', fake_registration):
+        runner = gevent.spawn(p.run)
+        gevent.sleep(0.1)
+        assert not runner.ready() and p._signal_watcher is not None
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert runner.get(timeout=3) == 0
+    assert p._stop and p._signal_watcher is None and p.inbound_server_socket is None
+
+
+def test_asyncio_sigterm_stops_the_proxy_gracefully():
+    async def main():
+        p = AsyncioDummy(proxy_id=uuid4(), token=uuid4(), manager_address='127.0.0.1', manager_port=1,
+                         manager_id=uuid4(), manager_token=uuid4(), registration_retry_delay=0,
+                         registration_timeout=0.05, inbound_params=SocketParams('127.0.0.1', 0))
+        with mock.patch.object(p, 'send_registration', mock.AsyncMock(return_value=True)):
+            serving = asyncio.ensure_future(p.start())
+            await asyncio.sleep(0.1)
+            assert not serving.done() and p.inbound_server is not None
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.wait_for(serving, 2)          # returns instead of raising CancelledError
+        assert p._stopping and not p.inbound_server.is_serving()
+    asyncio.run(main())
+
+
+def test_asyncio_sigterm_during_registration_stops_the_proxy_gracefully():
+    """The handler is armed before registration: a SIGTERM while the attempts are still running (or in the moment
+    after the reply) stops the proxy with a normal return, not the signal's default action (found by the Go manager,
+    2026-10-24)."""
+    async def main():
+        p = AsyncioDummy(proxy_id=uuid4(), token=uuid4(), manager_address='127.0.0.1', manager_port=1,
+                         manager_id=uuid4(), manager_token=uuid4(), registration_retry_delay=30,
+                         registration_timeout=30, inbound_params=SocketParams('127.0.0.1', 0))
+        registering = asyncio.Event()
+
+        async def slow_registration(remote):
+            registering.set()
+            await asyncio.sleep(60)
+            return True
+        with mock.patch.object(p, 'send_registration', slow_registration):
+            serving = asyncio.ensure_future(p.start())
+            await asyncio.wait_for(registering.wait(), 2)
+            assert not serving.done()
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.wait_for(serving, 2)          # returns, well before the 60 s attempt would have ended
+        assert p._stopping and not p.registered and not p.inbound_server.is_serving()
+    asyncio.run(main())
+
+
+def test_registration_reply_from_a_current_manager_records_its_features():
+    p = gevent_proxy()
+    manager_peer = p.peers[p.manager]
+    assert p.registration_accepted(manager_peer, b'{"registered": true, "features": ["compress"]}') is True
+    assert manager_peer.features == ('compress',)
+    assert p.registration_accepted(manager_peer, b'{"registered": false}') is False
+    assert p.registration_accepted(manager_peer, b'true') is True        # an older manager
+    assert p.registration_accepted(manager_peer, b'false') is False
+    assert p.registration_accepted(manager_peer, b'{"status": "error", "error": "x"}') is False
+    assert p.registration_accepted(manager_peer, b'garbage') is False
+    p.inbound_server_socket = mock.Mock(getsockname=lambda: ('127.0.0.1', 5))
+    assert json.loads(p._get_registration_message().payload)['features'] == list(ProtocolProxy.FEATURES)
+
+
+def test_a_failing_stop_still_ends_the_process(monkeypatch):
+    """A proxy whose stop() raises on SIGTERM or when the manager is lost exits instead of lingering (two did, and
+    spammed the ports a later platform reused). The hard-exit timer is armed before stop() is tried."""
+    exits, timers = [], []
+    monkeypatch.setattr('protocol_proxy.proxy.gevent.os._exit', lambda code: exits.append(code))
+    monkeypatch.setattr('protocol_proxy.proxy.base.os._exit', lambda code: exits.append(code))
+
+    class FakeTimer:
+        def __init__(self, interval, function):
+            timers.append((interval, function)); self.daemon = False
+        def start(self): pass
+    monkeypatch.setattr('protocol_proxy.proxy.base.threading.Timer', FakeTimer)
+    p = gevent_proxy()
+    p.stop = mock.Mock(side_effect=RuntimeError('flush failed'))
+    p._on_terminate_signal()
+    assert exits == [1] and timers and timers[0][0] == p.HARD_EXIT_GRACE
+    exits.clear()
+    q = gevent_proxy()
+    q.stop = mock.Mock(side_effect=RuntimeError('flush failed'))
+    with mock.patch.object(q, 'manager_alive', return_value=False):
+        q._watch_manager()
+    assert exits == [1]
+    # The timer itself exits the process when it fires.
+    timers[-1][1]()
+    assert exits[-1] == 1
+
+
+def test_asyncio_failing_stop_on_sigterm_exits():
+    async def main():
+        exits = []
+        p = AsyncioDummy(proxy_id=uuid4(), token=uuid4(), manager_address='127.0.0.1', manager_port=1,
+                         manager_id=uuid4(), manager_token=uuid4(), inbound_params=SocketParams('127.0.0.1', 0))
+        with mock.patch('protocol_proxy.proxy.asyncio.os._exit', lambda code: exits.append(code)), \
+             mock.patch('protocol_proxy.proxy.base.threading.Timer') as timer:
+            async def failing_stop():
+                raise RuntimeError('flush failed')
+            p.stop = failing_stop
+            p._on_terminate_signal(signal.SIGTERM)
+            await asyncio.sleep(0.05)
+        assert exits == [1] and timer.called
     asyncio.run(main())

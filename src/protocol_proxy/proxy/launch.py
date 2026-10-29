@@ -1,45 +1,19 @@
-import json
 import logging
 import sys
 
 from argparse import ArgumentParser, ArgumentTypeError
 from asyncio import iscoroutinefunction, run
 from importlib import import_module
-from os import environ
 from typing import Callable
 from uuid import UUID
 
 from ..ipc import SocketParams
+from ..logs import JsonLineFormatter, configure_logging    # noqa: F401  (re-exported; tests patch configure_logging)
+from ..tls import TlsMaterial
 
 _log = logging.getLogger(__name__)
 
 TOKEN_HEX_LENGTH = 32
-
-
-class JsonLineFormatter(logging.Formatter):
-    """Emit one JSON object per line. ProtocolProxyManager.log_subprocess_output_line parses these
-    and re-logs them in the manager's process, so every field must be JSON-escaped."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        message = record.getMessage()
-        if record.exc_info:
-            message = f'{message}\n{self.formatException(record.exc_info)}'
-        return json.dumps({'name': record.name, 'lineno': record.lineno, 'level': record.levelname,
-                           'message': message})
-
-
-def configure_logging(level: str | int | None = None):
-    """Route all logging to stdout (or the file named by PROTOCOL_PROXY_LOG) as JSON lines."""
-    level = level or environ.get('PROTOCOL_PROXY_LOG_LEVEL', 'INFO')
-    if log_file := environ.get('PROTOCOL_PROXY_LOG'):
-        handler: logging.Handler = logging.FileHandler(log_file)
-    else:
-        handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(JsonLineFormatter())
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.addHandler(handler)
-    root.setLevel(level)
 
 
 SENSITIVE_KEYS = ('password', 'token', 'secret', 'credential')
@@ -73,23 +47,63 @@ def proxy_command_parser(parser: ArgumentParser = None):
     parser.add_argument('--manager-port', type=int, default=22801,
                         help='Port of the outbound socket to the Proxy Manager.')
     parser.add_argument('--encrypt', type=str2bool, default=False,
-                        help='Whether to use encryption on the socket connections with the Manager.')
+                        help='Encrypt every frame to and from the manager (ChaCha20-Poly1305) with the key the manager'
+                             ' writes to stdin after the tokens. The manager passes the policy it applies itself.')
     parser.add_argument('--inbound-address', type=str, default='localhost',
                         help='Address of the inbound socket from the Proxy Manager')
     parser.add_argument('--inbound-port', type=int, default=None,
                         help='Port of the inbound socket from the Proxy Manager. Chosen automatically if omitted.')
+    parser.add_argument('--cipher', type=str, default='auto', choices=['auto', 'aes-256-gcm', 'chacha20-poly1305'],
+                        help='The AEAD used when encrypting toward the manager: auto picks AES-256-GCM on a CPU with AES'
+                             ' instructions, else ChaCha20-Poly1305. The manager passes its own choice.')
+    parser.add_argument('--ipc-tls', type=str2bool, default=False,
+                        help='Every IPC connection with the manager is TLS, with the certificate, key and CA the manager'
+                             ' writes to stdin after the tokens (and key). Both ends verify each other.')
+    parser.add_argument('--manager-dials', type=str2bool, default=False,
+                        help='Do not dial the manager: wait for it to connect to this proxy\'s listener (--inbound-port)'
+                             ' and register over that connection. For a proxy that cannot reach the manager\'s address.')
+    parser.add_argument('--persistent', type=str2bool, default=False,
+                        help='Keep one connection open to the manager for every frame in both directions, instead of a'
+                             ' connection per message. The manager passes the same policy it applies to this proxy.')
+    parser.add_argument('--compress-threshold', type=int, default=None,
+                        help='Compress payloads larger than this many bytes toward a peer that accepts compression'
+                             ' (default 4096; 0 compresses everything).')
+    parser.add_argument('--socket-logging', type=str2bool, default=True,
+                        help='After registering, ship log records to the manager in LOG batches over the IPC socket'
+                             ' instead of stderr (stderr still carries everything before registration and at exit).')
     parser.add_argument('--log-level', type=str, default=None,
-                        help='Logging level for the proxy process (default: PROTOCOL_PROXY_LOG_LEVEL or INFO).')
+                        help='Logging level for the proxy process (default: PROTOCOL_PROXY_LOG_LEVEL or INFO). A manager passes'
+                             ' the effective level of its protocol_proxy.proxies.<Class>.<name> logger.')
     return parser
 
 
-def _read_tokens() -> tuple[UUID, UUID]:
-    """The manager writes the proxy token followed by its own token, as hex, to the proxy's stdin."""
+KEY_HEX_LENGTH = 64
+
+
+def _read_tokens(encrypt: bool = False, ipc_tls: bool = False) -> tuple:
+    """The manager writes the proxy token followed by its own token, as hex, to the proxy's stdin, after them the
+    32-byte AEAD key (hex) when the proxy is launched with ``--encrypt``, and then one JSON line of TLS material
+    (``{"ca", "cert", "key"}`` PEM) when launched with ``--ipc-tls``. Nothing secret is on the command line.
+    Returns ``(proxy_token, manager_token, key, tls_material)``."""
     data = sys.stdin.buffer.read(2 * TOKEN_HEX_LENGTH)
     if len(data) != 2 * TOKEN_HEX_LENGTH:
         raise ValueError(f'Expected {2 * TOKEN_HEX_LENGTH} hex characters (proxy token + manager token) on stdin,'
                          f' got {len(data)} bytes. Proxies are meant to be launched by a ProtocolProxyManager.')
-    return UUID(hex=data[:TOKEN_HEX_LENGTH].decode('utf8')), UUID(hex=data[TOKEN_HEX_LENGTH:].decode('utf8'))
+    tokens = UUID(hex=data[:TOKEN_HEX_LENGTH].decode('utf8')), UUID(hex=data[TOKEN_HEX_LENGTH:].decode('utf8'))
+    key = None
+    if encrypt:
+        key_hex = sys.stdin.buffer.read(KEY_HEX_LENGTH)
+        if len(key_hex) != KEY_HEX_LENGTH:
+            raise ValueError(f'--encrypt is set but no {KEY_HEX_LENGTH // 2}-byte key followed the tokens on stdin'
+                             f' (got {len(key_hex)} bytes).')
+        key = bytes.fromhex(key_hex.decode('utf8'))
+    material = None
+    if ipc_tls:
+        line = sys.stdin.buffer.readline()
+        if not line.strip():
+            raise ValueError('--ipc-tls is set but no TLS material (one JSON line) followed on stdin.')
+        material = TlsMaterial.from_line(line)
+    return *tokens, key, material
 
 
 def launch(launcher_func: Callable, argv: list[str] | None = None) -> int:
@@ -103,14 +117,16 @@ def launch(launcher_func: Callable, argv: list[str] | None = None) -> int:
     opts = vars(parser.parse_args(argv))    # argparse exits itself on --help or bad arguments.
     configure_logging(opts.pop('log_level'))
     inbound_address, inbound_port = opts.pop('inbound_address'), opts.pop('inbound_port')
+    if opts.get('compress_threshold') is None:
+        opts.pop('compress_threshold', None)        # the connector's default applies
     opts['inbound_params'] = SocketParams(inbound_address, inbound_port) if inbound_port else None
     _log.info(f'Launching Proxy with parameters: {redact(opts)}')
     try:
-        proxy_token, manager_token = _read_tokens()
+        proxy_token, manager_token, key, material = _read_tokens(bool(opts.get('encrypt')), bool(opts.pop('ipc_tls', False)))
         if iscoroutinefunction(proxy_runner):
-            result = run(proxy_runner(token=proxy_token, manager_token=manager_token, **opts))
+            result = run(proxy_runner(token=proxy_token, manager_token=manager_token, key=key, ipc_tls=material, **opts))
         else:
-            result = proxy_runner(token=proxy_token, manager_token=manager_token, **opts)
+            result = proxy_runner(token=proxy_token, manager_token=manager_token, key=key, ipc_tls=material, **opts)
     except KeyboardInterrupt:
         _log.info('Proxy Launch: interrupted.')
         return 0

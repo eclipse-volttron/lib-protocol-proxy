@@ -1,0 +1,246 @@
+"""Header versions and callback dispatch: version 2 carries a remote id, and connectors dispatch on it when a
+callback is registered for that remote, falling back to the method-only callback."""
+from types import SimpleNamespace
+from unittest import mock
+from uuid import uuid4
+
+import asyncio
+
+from protocol_proxy.ipc import HeadersV1, HeadersV2, ProtocolProxyMessage
+from protocol_proxy.ipc.asyncio import AsyncioIPCConnector, AsyncioProtocolProxyPeer, IPCProtocol
+from protocol_proxy.proxy.gevent import GeventProtocolProxy
+
+
+class GeventDummy(GeventProtocolProxy):
+    pass
+
+
+def gevent_proxy():
+    return GeventDummy(proxy_id=uuid4(), token=uuid4(), manager_address='127.0.0.1', manager_port=1,
+                       manager_id=uuid4(), manager_token=uuid4(), registration_retry_delay=0, registration_timeout=0.1)
+
+
+def test_v1_round_trip_has_no_remote():
+    sender, token = uuid4(), uuid4()
+    packed = HeadersV1(42, 'READ_POINTS', 7, sender, token, True).pack()
+    assert len(packed) == 2 + HeadersV1.HEADER_LENGTH
+    headers = HeadersV1.unpack(packed[2:])
+    assert (headers.data_length, headers.method_name, headers.request_id) == (42, 'READ_POINTS', 7)
+    assert headers.sender_id == sender and headers.sender_token == token and headers.response_expected is True
+    assert headers.remote_id is None
+
+
+def test_v2_round_trip_with_and_without_remote():
+    sender, token, remote = uuid4(), uuid4(), uuid4()
+    packed = HeadersV2(5, 'RECEIVE_UNSOLICITED', 9, sender, token, False, remote).pack()
+    assert len(packed) == 2 + HeadersV2.HEADER_LENGTH == 2 + HeadersV1.HEADER_LENGTH + 16 + 2   # remote id, wider request id
+    assert packed[:2] == b'\x00\x02'
+    headers = HeadersV2.unpack(packed[2:])
+    assert headers.remote_id == remote and headers.method_name == 'RECEIVE_UNSOLICITED' and headers.response_expected is False
+    assert 'remote_id' in repr(headers)
+    bare = HeadersV2.unpack(HeadersV2(0, 'M', 1, sender, token).pack()[2:])
+    assert bare.remote_id is None
+
+
+def test_v2_request_ids_are_32_bits_and_v1_refuses_them():
+    import pytest
+    sender, token = uuid4(), uuid4()
+    wide = 0xFFFFFFFE
+    headers = HeadersV2.unpack(HeadersV2(0, 'M', wide, sender, token).pack()[2:])
+    assert headers.request_id == wide
+    assert HeadersV2.HEADER_LENGTH == 94 and HeadersV1.HEADER_LENGTH == 76
+    with pytest.raises(ValueError, match='version 1'):
+        HeadersV1(0, 'M', 0x10000, sender, token).pack()
+
+
+def test_connectors_draw_request_ids_that_fit_the_header_version():
+    p = gevent_proxy()
+    assert 1 <= p.request_id_for(1) <= 0xFFFF
+    p._request_ids[2] = iter([0x10000, 0x10001])
+    assert p.request_id_for(2) == 0x10000 and p.next_request_id == 0x10001      # not folded to 16 bits
+    assert HeadersV2.REQUEST_ID_MAX == 0xFFFFFFFF and HeadersV1.REQUEST_ID_MAX == 0xFFFF
+
+
+def test_messages_default_to_version_2_and_may_opt_down():
+    assert ProtocolProxyMessage('M', b'').protocol_version == 2
+    assert ProtocolProxyMessage('M', b'', remote_id=uuid4()).protocol_version == 2
+    assert ProtocolProxyMessage('M', b'', protocol_version=1).protocol_version == 1
+
+
+def test_connector_dispatches_by_remote_then_method():
+    p = gevent_proxy()
+    remote_a, remote_b = uuid4(), uuid4()
+    default, for_a = mock.Mock(name='default'), mock.Mock(name='a')
+    p.register_callback(default, 'PUSH')
+    p.register_callback(mock.Mock(name='second-default'), 'PUSH')             # first registration wins
+    p.register_callback(for_a, 'PUSH', remote_id=remote_a)
+    assert p.find_callback(SimpleNamespace(method_name='PUSH', remote_id=remote_a)).method is for_a
+    assert p.find_callback(SimpleNamespace(method_name='PUSH', remote_id=remote_b)).method is default    # unknown remote
+    assert p.find_callback(SimpleNamespace(method_name='PUSH', remote_id=None)).method is default
+    assert p.find_callback(SimpleNamespace(method_name='PUSH')).method is default                       # a V1 header
+    assert p.find_callback(SimpleNamespace(method_name='OTHER', remote_id=remote_a)) is None
+    replacement = mock.Mock(name='a2')
+    p.register_callback(replacement, 'PUSH', remote_id=remote_a)                  # a remote's handler is replaceable
+    assert p.find_callback(SimpleNamespace(method_name='PUSH', remote_id=remote_a)).method is replacement
+    assert p.unregister_callback('PUSH', remote_id=remote_a) and not p.unregister_callback('PUSH', remote_id=remote_a)
+    assert p.find_callback(SimpleNamespace(method_name='PUSH', remote_id=remote_a)).method is default
+    assert p.unregister_callback('PUSH') and p.find_callback(SimpleNamespace(method_name='PUSH', remote_id=None)) is None
+
+
+def test_gevent_sends_the_message_version_with_or_without_a_remote():
+    p = gevent_proxy()
+    remote = uuid4()
+    tagged = p._pack_headers(3, 1, False, 'M', 2, remote)
+    assert tagged[:2] == b'\x00\x02' and HeadersV2.unpack(tagged[2:]).remote_id == remote
+    untagged = p._pack_headers(3, 1, False, 'M', 2, None)
+    assert untagged[:2] == b'\x00\x02' and HeadersV2.unpack(untagged[2:]).remote_id is None
+    v1 = p._pack_headers(3, 1, False, 'M', 1)                                   # opted down for an old peer
+    assert v1[:2] == b'\x00\x01' and len(v1) == 2 + HeadersV1.HEADER_LENGTH
+
+
+def test_asyncio_frames_dispatch_by_their_own_header_version():
+    """One connection receives a V2 frame for remote A, then a V1 frame; each reaches the right callback."""
+    async def main():
+        connector = AsyncioIPCConnector(proxy_id=uuid4(), token=uuid4(), proxy_name='c')
+        connector.peers[connector.proxy_id] = AsyncioProtocolProxyPeer(proxy_id=connector.proxy_id, token=connector.token)
+        remote = uuid4()
+        got = []
+        connector.register_callback(lambda conn, headers, data: got.append(('default', headers.remote_id, data)), 'PUSH')
+        connector.register_callback(lambda conn, headers, data: got.append(('a', headers.remote_id, data)), 'PUSH', remote_id=remote)
+        protocol = IPCProtocol(connector=connector)
+        protocol.transport = mock.Mock()
+        frames = (protocol._message_to_bytes(ProtocolProxyMessage('PUSH', b'for-a', request_id=1, remote_id=remote))
+                  + protocol._message_to_bytes(ProtocolProxyMessage('PUSH', b'plain', request_id=2, protocol_version=1)))
+        assert frames[:2] == b'\x00\x02'
+        buffer = protocol.get_buffer(len(frames))
+        buffer[:len(frames)] = frames
+        protocol.buffer_updated(len(frames))           # first frame
+        protocol.buffer_updated(0)                     # second frame, already buffered
+        await asyncio.sleep(0)
+        assert got == [('a', remote, b'for-a'), ('default', None, b'plain')]
+    asyncio.run(main())
+
+
+def _feed(protocol, frames: bytes, chunk: int):
+    """Deliver ``frames`` the way asyncio does: into whatever view get_buffer hands out, a chunk at a time."""
+    offset = 0
+    while offset < len(frames):
+        view = protocol.get_buffer(chunk)
+        n = min(len(view), chunk, len(frames) - offset)
+        view[:n] = frames[offset:offset + n]
+        protocol.buffer_updated(n)
+        offset += n
+
+
+def test_asyncio_receives_frames_larger_than_its_buffer_and_across_the_ring_end():
+    """A 100 KB registration payload arrives in 1 KB reads into a 32 KB ring: the buffer grows and the callback gets the
+    whole payload; small frames that straddle the end of the ring are straightened out rather than lost."""
+    async def main():
+        connector = AsyncioIPCConnector(proxy_id=uuid4(), token=uuid4(), proxy_name='c')
+        connector.peers[connector.proxy_id] = AsyncioProtocolProxyPeer(proxy_id=connector.proxy_id, token=connector.token)
+        got = []
+        connector.register_callback(lambda conn, headers, data: got.append((headers.request_id, bytes(data))), 'PUSH')
+        protocol = IPCProtocol(connector=connector)
+        protocol.transport = mock.Mock()
+        big = bytes(range(256)) * 400                                     # 102 400 bytes
+        _feed(protocol, protocol._message_to_bytes(ProtocolProxyMessage('PUSH', big, request_id=1)), 1024)
+        await asyncio.sleep(0)
+        assert got == [(1, big)] and protocol.buffer_size > 32768
+
+        small = IPCProtocol(connector=connector, buffer_size=300)
+        small.transport = mock.Mock()
+        payloads = [bytes([i]) * 100 for i in range(1, 6)]               # 176-byte frames in a 300-byte ring
+        frames = b''.join(small._message_to_bytes(ProtocolProxyMessage('PUSH', p, request_id=10 + i)) for i, p in enumerate(payloads))
+        _feed(small, frames, 50)
+        await asyncio.sleep(0)
+        assert got[1:] == [(10 + i, p) for i, p in enumerate(payloads)]
+    asyncio.run(main())
+
+
+def test_keep_alive_bit_round_trips_in_both_versions():
+    from uuid import uuid4
+    from protocol_proxy.ipc import HeadersV1, HeadersV2
+    sender, token = uuid4(), uuid4()
+    for cls in (HeadersV1, HeadersV2):
+        packed = cls(3, 'M', 7, sender, token, response_expected=True, keep_alive=True).pack()
+        headers = cls.unpack(packed[2:])
+        assert headers.keep_alive and headers.response_expected and headers.request_id == 7
+        plain = cls.unpack(cls(3, 'M', 7, sender, token).pack()[2:])
+        assert not plain.keep_alive and not plain.response_expected
+    assert HeadersV1.KEEP_ALIVE_BIT == 3 and HeadersV2.KEEP_ALIVE_BIT == 3
+
+
+def test_compressed_bit_round_trips_independently_of_the_others():
+    from uuid import uuid4
+    from protocol_proxy.ipc import HeadersV1, HeadersV2
+    sender, token = uuid4(), uuid4()
+    for cls in (HeadersV1, HeadersV2):
+        headers = cls.unpack(cls(3, 'M', 7, sender, token, compressed=True).pack()[2:])
+        assert headers.compressed and not headers.keep_alive and not headers.response_expected
+        both = cls.unpack(cls(3, 'M', 7, sender, token, response_expected=True, keep_alive=True, compressed=True).pack()[2:])
+        assert both.compressed and both.keep_alive and both.response_expected
+    assert HeadersV1.COMPRESSED_BIT == 1
+
+
+def test_encrypted_bit_round_trips():
+    from uuid import uuid4
+    from protocol_proxy.ipc import HeadersV1, HeadersV2
+    sender, token = uuid4(), uuid4()
+    for cls in (HeadersV1, HeadersV2):
+        headers = cls.unpack(cls(3, 'M', 7, sender, token, encrypted=True, compressed=True).pack()[2:])
+        assert headers.encrypted and headers.compressed and not headers.keep_alive
+    assert HeadersV1.ENCRYPTED_BIT == 2
+
+
+def test_aes_gcm_bit_round_trips():
+    from uuid import uuid4
+    from protocol_proxy.ipc import HeadersV1, HeadersV2
+    sender, token = uuid4(), uuid4()
+    for cls in (HeadersV1, HeadersV2):
+        headers = cls.unpack(cls(3, 'M', 7, sender, token, encrypted=True, aes_gcm=True).pack()[2:])
+        assert headers.encrypted and headers.aes_gcm
+        assert not cls.unpack(cls(3, 'M', 7, sender, token, encrypted=True).pack()[2:]).aes_gcm
+    assert HeadersV1.AES_GCM_BIT == 4
+
+
+def test_frames_from_strangers_are_dropped_with_an_empty_reply_and_answered_in_their_version():
+    """PROTOCOL.md §6 and §3: a request whose sender is unknown or carries the wrong token gets an empty RESPONSE at
+    once; a request in header version 1 is answered in version 1."""
+    import json
+    import socket
+    import struct
+    from uuid import uuid4
+    import gevent
+    from protocol_proxy.ipc import ProtocolProxyMessage
+    from protocol_proxy.ipc.gevent import GeventIPCConnector, GeventProtocolProxyPeer
+    from protocol_proxy.ipc.headers import HeadersV1, HeadersV2
+    b = GeventIPCConnector(proxy_id=uuid4(), token=uuid4(), proxy_name='b')
+    b.register_callback(lambda ipc, headers, raw: b'pong', 'PONG', provides_response=True)
+    b.start(); loop = gevent.spawn(b.select_loop); gevent.sleep(0.2)      # let the accept loop start
+    try:
+        friend_id, friend_token = uuid4(), uuid4()
+        b.peers[friend_id] = GeventProtocolProxyPeer(proxy_id=friend_id, token=friend_token)
+
+        def ask(version, sender_id, sender_token):
+            cls = HeadersV1 if version == 1 else HeadersV2
+            header = cls(data_length=0, method_name='PONG', request_id=7, sender_id=sender_id, sender_token=sender_token,
+                         response_expected=True, **({} if version == 1 else {'remote_id': None})).pack()
+            with socket.create_connection((b.inbound_params.address, b.inbound_params.port), timeout=5) as sock:
+                sock.sendall(header)
+                gevent.sleep(0.3)            # a plain socket blocks the hub: let the server greenlet answer first
+                sock.settimeout(5)
+                raw = sock.recv(4096)
+            (reply_version,) = struct.unpack('>H', raw[:2])
+            reply = (HeadersV1 if reply_version == 1 else HeadersV2).unpack(raw[2:2 + (HeadersV1 if reply_version == 1 else HeadersV2).HEADER_LENGTH])
+            return reply_version, reply, raw[2 + reply.HEADER_LENGTH:]
+
+        version, reply, payload = ask(2, friend_id, friend_token)
+        assert (version, reply.method_name, payload) == (2, 'RESPONSE', b'pong')
+        version, reply, payload = ask(1, friend_id, friend_token)
+        assert (version, reply.method_name, payload) == (1, 'RESPONSE', b'pong')        # answered in version 1
+        version, reply, payload = ask(2, uuid4(), friend_token)                        # unknown sender
+        assert (reply.method_name, reply.request_id, payload) == ('RESPONSE', 7, b'')
+        version, reply, payload = ask(2, friend_id, uuid4())                           # wrong token
+        assert (reply.method_name, payload) == ('RESPONSE', b'')
+    finally:
+        b.stop(); gevent.joinall([loop], timeout=2)

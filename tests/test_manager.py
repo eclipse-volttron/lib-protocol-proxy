@@ -1,5 +1,15 @@
+import io
+import json
+import logging
+import os
+import time
+
+from types import SimpleNamespace
 from unittest import mock
 from uuid import uuid4
+
+import gevent
+from gevent.event import Event
 
 from protocol_proxy.ipc import SocketParams
 from protocol_proxy.manager.gevent import GeventProtocolProxyManager
@@ -7,9 +17,7 @@ from protocol_proxy.proxy.gevent import GeventProtocolProxy
 
 
 class DummyProxy(GeventProtocolProxy):
-    @classmethod
-    def get_unique_remote_id(cls, unique_remote_id):
-        return unique_remote_id
+    pass
 
 
 def test_command_line_skips_none_and_manager_only_kwargs():
@@ -20,8 +28,31 @@ def test_command_line_skips_none_and_manager_only_kwargs():
     # DummyProxy is a GeventProtocolProxy, so the entry point is told to monkey-patch before importing it.
     assert command[1:5] == ['-m', 'protocol_proxy.proxy', '--gevent', f'{DummyProxy.__module__}:DummyProxy']
     tail = command[command.index('--host'):]
-    assert tail == ['--host', 'h', '--port', '1', '--tls', 'True']
+    level = logging.getLevelName(logging.getLogger('protocol_proxy.proxies.DummyProxy.dummy_x').getEffectiveLevel())
+    assert tail == ['--host', 'h', '--port', '1', '--tls', 'True', '--log-level', level]
     assert '--manager-callbacks' not in command and '--password' not in command
+
+
+def test_command_line_log_level_follows_the_proxy_logger_unless_given():
+    manager = GeventProtocolProxyManager(proxy_class=DummyProxy)
+    manager.inbound_params = SocketParams('127.0.0.1', 22801)
+    logger = logging.getLogger("protocol_proxy.proxies.DummyProxy.dummy_192_168_0_1_502")
+    logger.setLevel(logging.DEBUG)
+    try:
+        command, *_ = manager._setup_proxy_process_command(('dummy', '192.168.0.1', 502))
+        assert command[command.index('--log-level') + 1] == 'DEBUG'
+        command, *_ = manager._setup_proxy_process_command(('dummy', '192.168.0.1', 502), log_level='ERROR')
+        assert command[command.index('--log-level') + 1] == 'ERROR'
+    finally:
+        logger.setLevel(logging.NOTSET)
+
+
+def test_launched_process_gets_the_manager_marker_in_its_environment():
+    manager = _manager()
+    with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess), mock.patch('atexit.register'):
+        manager.get_proxy(('dummy', 'x'))
+    env = FakeProcess.last_kwargs['env']
+    assert env['_LAUNCHED_BY_PROXY_MANAGER'] == '1' and env['PATH'] == os.environ['PATH']
 
 
 def test_class_get_proxy_pops_manager_callbacks():
@@ -32,3 +63,186 @@ def test_class_get_proxy_pops_manager_callbacks():
             GeventProtocolProxyManager, ('mqtt', 'h'), manager_callbacks=callbacks, host='h')
         get_manager.assert_called_once_with('mqtt', callbacks)
         manager.get_proxy.assert_called_once_with(('mqtt', 'h'), host='h')
+
+
+class _RecordingStdin(io.BytesIO):
+    """What the manager writes to the child's stdin is kept as FakeProcess.last_stdin (recorded on each write, not on
+    close: a never-closed instance being garbage-collected would otherwise overwrite it with nothing)."""
+    def write(self, data):
+        n = super().write(data)
+        FakeProcess.last_stdin = self.getvalue()
+        return n
+
+
+class FakeProcess:
+    """A launched proxy process that exits when the test says so."""
+    _pids = iter(range(1000, 2000))
+
+    last_kwargs: dict = {}
+    last_args: tuple = ()
+    last_stdin: bytes = b''
+
+    def __init__(self, *args, **kwargs):
+        FakeProcess.last_kwargs = kwargs
+        FakeProcess.last_args = args
+        self.pid = next(self._pids)
+        self.stdin = _RecordingStdin()
+        self.stdout, self.stderr = io.BytesIO(b''), io.BytesIO(b'')
+        self.returncode = None
+        self._exited = Event()
+        self.terminated = False
+
+    def exit(self, code):
+        self.returncode = code
+        self._exited.set()
+
+    def wait(self, timeout=None):
+        self._exited.wait(timeout)
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.exit(-15)
+
+    kill = terminate
+
+
+def _manager():
+    manager = GeventProtocolProxyManager(proxy_class=DummyProxy)
+    manager.inbound_params = SocketParams('127.0.0.1', 22801)
+    return manager
+
+
+class TestSupervision:
+    def test_dead_process_removes_peer_and_notifies_listeners(self):
+        lost = []
+        manager = _manager()
+        manager.on_peer_lost(lambda peer, reason: lost.append((peer, reason)))
+        with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess), mock.patch('atexit.register'):
+            peer = manager.get_proxy(('dummy', 'x'))
+            assert manager.get_proxy(('dummy', 'x')) is peer                   # alive: no relaunch
+            peer.process.exit(3)
+            gevent.sleep(0.05)
+            assert peer.proxy_id not in manager.peers
+            assert lost == [(peer, 'process exited with code 3')]
+            replacement = manager.get_proxy(('dummy', 'x'))                    # relaunched on demand
+        assert replacement is not peer and replacement.proxy_id == peer.proxy_id
+        assert replacement.process.pid != peer.process.pid
+
+    def test_exit_of_a_replaced_process_leaves_the_current_peer_alone(self):
+        lost = []
+        manager = _manager()
+        manager.on_peer_lost(lambda peer, reason: lost.append(peer))
+        with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess), mock.patch('atexit.register'):
+            old = manager.get_proxy(('dummy', 'x'))
+            del manager.peers[old.proxy_id]                                     # e.g. a registration timeout
+            new = manager.get_proxy(('dummy', 'x'))
+            old.process.exit(1)
+            gevent.sleep(0.05)
+        assert manager.peers[new.proxy_id] is new and lost == []
+
+    def test_registration_timeout_stops_the_process_and_notifies(self):
+        lost, ran = [], []
+        manager = _manager()
+        manager.on_peer_lost(lambda peer, reason: lost.append(reason))
+        with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess), mock.patch('atexit.register'):
+            peer = manager.get_proxy(('dummy', 'x'))
+            manager.wait_peer_registered(peer, 0.05, lambda: ran.append(1))
+            gevent.sleep(0.05)
+        assert peer.proxy_id not in manager.peers and ran == []
+        assert peer.process.terminated and lost == ['did not register within 0.05 seconds']
+
+    def test_failing_post_registration_function_keeps_the_peer(self):
+        lost = []
+        manager = _manager()
+        manager.on_peer_lost(lambda peer, reason: lost.append(reason))
+        with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess), mock.patch('atexit.register'):
+            peer = manager.get_proxy(('dummy', 'x'))
+            peer.socket_params = SocketParams('127.0.0.1', 5)
+
+            def boom():
+                raise RuntimeError('registration payload rejected')
+            manager.wait_peer_registered(peer, 0.05, boom)                     # does not raise
+        assert manager.peers[peer.proxy_id] is peer and lost == [] and not peer.process.terminated
+
+    def test_listeners_are_held_weakly(self):
+        manager = _manager()
+
+        class User:
+            def __init__(self): self.seen = []
+            def lost(self, peer, reason): self.seen.append(reason)
+        user, gone = User(), User()
+        manager.on_peer_lost(user.lost)
+        manager.on_peer_lost(gone.lost)
+        del gone
+        manager._notify_peer_lost(mock.Mock(proxy_id=uuid4()), 'why')
+        assert user.seen == ['why'] and len(manager.peer_lost_callbacks) == 1
+
+
+class SlowProcess(FakeProcess):
+    """Launching yields, as the real Popen does."""
+    def __init__(self, *args, **kwargs):
+        gevent.sleep(0.01)
+        super().__init__(*args, **kwargs)
+
+
+def test_concurrent_get_proxy_calls_launch_one_process():
+    manager = _manager()
+    with mock.patch('protocol_proxy.manager.gevent.Popen', SlowProcess) as popen, mock.patch('atexit.register'):
+        peers = [g.get() for g in gevent.joinall([gevent.spawn(manager.get_proxy, ('dummy', 'x')) for _ in range(3)])]
+    assert peers[0] is peers[1] is peers[2] and peers[0].process is not None
+    assert len(manager.peers) == 1 and FakeProcess._pids.__next__() - peers[0].process.pid == 1       # one launch
+
+
+def test_registration_wakes_the_waiter_at_once():
+    """wait_peer_registered is woken by handle_peer_registration rather than polling for the address."""
+    manager = _manager()
+    ran = []
+    with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess):
+        peer = manager.get_proxy(('dummy', 'x'))
+
+        def register():
+            gevent.sleep(0.05)
+            headers = SimpleNamespace(sender_id=peer.proxy_id, sender_token=peer.token, request_id=1)
+            manager.handle_peer_registration(manager, headers, json.dumps({'address': '127.0.0.1', 'port': 5}).encode())
+        gevent.spawn(register)
+        started = time.monotonic()
+        manager.wait_peer_registered(peer, 5, lambda: ran.append(1))
+        elapsed = time.monotonic() - started
+    assert ran == [1] and peer.socket_params == SocketParams('127.0.0.1', 5) and peer.registered.is_set()
+    assert 0.04 < elapsed < 0.5, elapsed
+
+
+def test_encrypting_manager_writes_a_key_after_the_tokens_and_passes_the_option():
+    manager = GeventProtocolProxyManager(proxy_class=DummyProxy, encrypt=True)
+    manager.inbound_params = SocketParams('127.0.0.1', 22801)
+    with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess), mock.patch('atexit.register'):
+        peer = manager.get_proxy(('dummy', 'x'))
+    assert len(peer.key) == 32
+    written = FakeProcess.last_stdin
+    assert written == (peer.token.hex + manager.token.hex + peer.key.hex()).encode()
+    command = FakeProcess.last_args[0]
+    assert command[command.index('--encrypt') + 1] == 'True'
+    plain = GeventProtocolProxyManager(proxy_class=DummyProxy)
+    plain.inbound_params = SocketParams('127.0.0.1', 22801)
+    with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess), mock.patch('atexit.register'):
+        peer = plain.get_proxy(('dummy', 'y'))
+        assert peer.key is None and len(FakeProcess.last_stdin) == 64 and '--encrypt' not in FakeProcess.last_args[0]
+        peer = plain.get_proxy(('dummy', 'z'), encrypt=True)      # per proxy
+        assert len(peer.key) == 32 and len(FakeProcess.last_stdin) == 128
+
+
+def test_cipher_travels_to_encrypted_proxies_only():
+    manager = GeventProtocolProxyManager(proxy_class=DummyProxy, encrypt=True, cipher='chacha20-poly1305')
+    manager.inbound_params = SocketParams('127.0.0.1', 22801)
+    command, *_ = manager._setup_proxy_process_command(('dummy', 'c'))
+    assert command[command.index('--cipher') + 1] == 'chacha20-poly1305'
+    command, *_ = manager._setup_proxy_process_command(('dummy', 'd'), cipher='aes-256-gcm')
+    assert command[command.index('--cipher') + 1] == 'aes-256-gcm'                 # per proxy
+    plain = GeventProtocolProxyManager(proxy_class=DummyProxy)
+    plain.inbound_params = SocketParams('127.0.0.1', 22801)
+    command, *_ = plain._setup_proxy_process_command(('dummy', 'e'))
+    assert '--cipher' not in command                                               # nothing to encrypt with

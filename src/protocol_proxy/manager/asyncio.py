@@ -10,6 +10,7 @@ from typing import Type
 
 from ..ipc import callback, ProtocolHeaders, ProtocolProxyPeer
 from ..ipc.asyncio import AsyncioIPCConnector, AsyncioProtocolProxyPeer
+from ..logs import log_entries
 from ..proxy import ProtocolProxy
 from . import ProtocolProxyManager
 
@@ -17,8 +18,58 @@ _log = logging.getLogger(__name__)
 
 
 class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC):
-    def __init__(self, proxy_class: Type[ProtocolProxy], **kwargs):
+    def __init__(self, proxy_class: Type[ProtocolProxy] | None = None, **kwargs):
         super().__init__(proxy_class=proxy_class, **kwargs)
+        self._heartbeat: asyncio.Task | None = None
+
+    # ---- heartbeat -----------------------------------------------------------------------------------------------
+    def start_heartbeat(self):
+        if self.heartbeat_interval and (self._heartbeat is None or self._heartbeat.done()):
+            self._heartbeat = self.loop.create_task(self._heartbeat_loop())
+
+    async def _heartbeat_loop(self):
+        while True:
+            await asyncio.sleep(self.heartbeat_interval)
+            for peer in self.peers_to_ping():
+                self.loop.create_task(self._ping(peer))
+
+    async def _ping(self, peer: AsyncioProtocolProxyPeer):
+        try:
+            result = await self.send(peer, self.ping_message())
+            if result is False:
+                raise ConnectionError('send refused')
+            reply = await asyncio.wait_for(result, self.heartbeat_timeout)
+        except asyncio.TimeoutError:
+            lost = self.heartbeat_missed(peer, f'no reply within {self.heartbeat_timeout} s')
+        except Exception as e:
+            lost = self.heartbeat_missed(peer, str(e))
+        else:
+            self.heartbeat_answered(peer, reply)
+            return
+        if lost and self.peers.get(peer.proxy_id) is peer:
+            self._lose_peer(peer, f'missed {peer.missed} heartbeats')
+
+    async def _dial_until_registered(self, peer: AsyncioProtocolProxyPeer, interval: float = 1.0):
+        while self.peers.get(peer.proxy_id) is peer and peer.socket_params is None:
+            try:
+                result = await self.send(peer, self.ping_message())
+                if result is not False:
+                    await asyncio.wait_for(result, self.heartbeat_timeout)
+            except Exception as e:
+                _log.debug(f'PPM: {peer.name} not reachable yet at {peer.dial_params}: {e}')
+            await asyncio.sleep(interval)
+
+    def _lose_peer(self, peer: ProtocolProxyPeer, reason: str):
+        """Forget a peer, stop its process if it still runs, and tell the peer-lost listeners."""
+        if self.peers.get(peer.proxy_id) is peer:
+            del self.peers[peer.proxy_id]
+        process = getattr(peer, 'process', None)
+        if process is not None and process.returncode is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+        self._notify_peer_lost(peer, reason)
 
     async def wait_peer_registered(self, peer, timeout, func=None, *args, **kwargs):
         """ Waits for a peer to be ready, optionally calling a function when it is.
@@ -41,25 +92,42 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
         command, proxy_id, proxy_name = self._setup_proxy_process_command(unique_remote_id, **kwargs)  # , proxy_env
         if command:
             proxy_process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
-                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            self.loop.create_task(self.log_subprocess_output(proxy_process.stdout))
-            self.loop.create_task(self.log_subprocess_output(proxy_process.stderr))
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                                                    env=self.proxy_environment())
+            logger = self.proxy_logger(proxy_name)
+            for stream_name in ('stdout', 'stderr'):
+                self.loop.create_task(self.log_subprocess_output(getattr(proxy_process, stream_name), logger,
+                                                                 stream_name, proxy_process.pid, proxy_name))
             _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
             peer_token = uuid4()
+            key = self.new_key() if self.peer_encrypted(kwargs) else None
+            tls = self.peer_tls(kwargs)
+            material = self.tls_material_for(proxy_id) if tls else None
             proxy_process.stdin.write(peer_token.hex.encode())
             proxy_process.stdin.write(self.token.hex.encode())
+            if key is not None:
+                proxy_process.stdin.write(key.hex().encode())
+            if material is not None:
+                proxy_process.stdin.write(material.to_line())
             await proxy_process.stdin.drain()
             proxy_process.stdin.close()
             proxy_process.stdin = None
-            self.peers[proxy_id] = AsyncioProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id, token=peer_token)
+            dial = self.dial_target(kwargs)
+            self.peers[proxy_id] = peer = AsyncioProtocolProxyPeer(
+                process=proxy_process, proxy_id=proxy_id, token=peer_token, name=proxy_name,
+                persistent=True if dial else self.peer_policy(kwargs), dial_params=dial, key=key, tls=tls)
+            if dial is not None:
+                self.loop.create_task(self._dial_until_registered(peer))
             self._setup_exit(proxy_process)
             atexit.register(self.finalize_process, proxy_process)
+            self.start_heartbeat()
         return self.peers[proxy_id]
 
-    async def log_subprocess_output(self, stream: StreamReader):
+    async def log_subprocess_output(self, stream: StreamReader, logger: logging.Logger, stream_name: str = 'stderr',
+                                    pid: int | None = None, process_name: str | None = None):
         while not stream.at_eof():
             raw_line = await stream.readline()
-            self.log_subprocess_output_line(raw_line)
+            log_entries([raw_line], logger, stream_name=stream_name, pid=pid, process_name=process_name)
 
     @callback
     async def handle_peer_registration(self, headers: ProtocolHeaders, raw_message: bytes):
@@ -71,6 +139,10 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
             success = super().handle_peer_registration(headers, raw_message)
             proxy.ready.notify_all()
             return success
+
+    @callback
+    def handle_log(self, headers: ProtocolHeaders, raw_message: bytes):
+        return super().handle_log(headers, raw_message)
 
     @staticmethod
     def _setup_exit(process: subprocess.Process):

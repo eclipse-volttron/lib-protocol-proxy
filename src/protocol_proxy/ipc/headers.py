@@ -12,6 +12,10 @@ class ProtocolHeaders(metaclass=ABCMeta):
     FORMAT = 'Q32sH16s16s'
     HEADER_LENGTH = struct.calcsize(FORMAT)
     VERSION = 0                                     # 2 byte (16 bit) integer (H)
+    #: Largest request id the version's header field holds (16 bits before version 2, 32 bits from version 2).
+    REQUEST_ID_MAX = 0xFFFF
+    #: Which remote (device, outstation, server...) a message concerns; versions before 2 carry none.
+    remote_id: UUID | None = None
 
     @abstractmethod
     def __init__(self, data_length: int, method_name: str, request_id: int, sender_id, sender_token, **kwargs):
@@ -28,10 +32,16 @@ class ProtocolHeaders(metaclass=ABCMeta):
     def bitflag_is_set(bit_position, byte_value):
         return bool((byte_value & (1 << bit_position)) >> bit_position)
 
+    def _check_request_id(self):
+        if not 0 <= self.request_id <= self.REQUEST_ID_MAX:
+            raise ValueError(f'Request id {self.request_id} does not fit the version {self.VERSION} header'
+                             f' (maximum {self.REQUEST_ID_MAX}).')
+
     @abstractmethod
     def pack(self):
         # TODO: The sender_id is currently the proxy_id, which is a tuple. This should probably become a UUID?
         #  (Need to figure out how/where to map one to the other.)
+        self._check_request_id()
         return struct.pack(f'>H{ProtocolHeaders.FORMAT}', self.VERSION, self.data_length,
                            self.method_name.encode('utf8'), self.request_id, self.sender_id.bytes,
                            self.sender_token.bytes)
@@ -49,28 +59,95 @@ class ProtocolHeaders(metaclass=ABCMeta):
 class HeadersV1(ProtocolHeaders):
     FORMAT = ProtocolHeaders.FORMAT + 'H'
     HEADER_LENGTH = struct.calcsize(FORMAT)  # TODO: Should we make this a property instead?
+    #: bitflags: bit 0 response expected; bits 1 and 2 are reserved for compression and encryption; bit 3 keep-alive.
     RESPONSE_EXPECTED_BIT = 0
+    COMPRESSED_BIT = 1
+    ENCRYPTED_BIT = 2
+    KEEP_ALIVE_BIT = 3
+    AES_GCM_BIT = 4
     VERSION = 1
 
     def __init__(self, data_length: int, method_name: str, request_id: int, sender_id, sender_token,
-                 response_expected: bool = False, **kwargs):
+                 response_expected: bool = False, keep_alive: bool = False, compressed: bool = False,
+                 encrypted: bool = False, aes_gcm: bool = False, **kwargs):
         super(HeadersV1, self).__init__(data_length, method_name, request_id, sender_id, sender_token, **kwargs)
         self.response_expected: bool = response_expected  # Position 0 in bitflags within struct.
+        # The payload is zlib-compressed (data_length counts the compressed bytes).
+        self.compressed: bool = compressed
+        # The payload is nonce + AEAD ciphertext + tag, with this whole header (version word included) as the
+        # associated data; data_length counts the wire bytes.
+        self.encrypted: bool = encrypted
+        # With encrypted: the AEAD is AES-256-GCM rather than the baseline ChaCha20-Poly1305 (same key, nonce, tag).
+        self.aes_gcm: bool = aes_gcm
+        # The sender keeps this connection open for further frames in both directions (a persistent connection); the
+        # receiver may send to the authenticated sender on it instead of dialling the sender's advertised address.
+        self.keep_alive: bool = keep_alive
+
+    def _bitflags(self) -> int:
+        return ((int(self.response_expected) << self.RESPONSE_EXPECTED_BIT)
+                | (int(self.compressed) << self.COMPRESSED_BIT)
+                | (int(self.encrypted) << self.ENCRYPTED_BIT)
+                | (int(self.keep_alive) << self.KEEP_ALIVE_BIT)
+                | (int(self.aes_gcm) << self.AES_GCM_BIT))
 
     def pack(self):
-        bitflags = (int(self.response_expected) << self.RESPONSE_EXPECTED_BIT)  # 2 byte (16-bit) bitflags.
-        return super(HeadersV1, self).pack() + struct.pack(f'>H', bitflags)
+        return super(HeadersV1, self).pack() + struct.pack(f'>H', self._bitflags())    # 2 byte (16-bit) bitflags.
 
     @classmethod
     def unpack(cls, header_bytes):
         (data_length, method_bytes, request_id, sender_id_bytes, sender_token_bytes,
          bitflags) = struct.unpack('>' + cls.FORMAT, header_bytes)
-        response_expected = cls.bitflag_is_set(cls.RESPONSE_EXPECTED_BIT, bitflags)
         method = method_bytes.rstrip(b'\x00').decode('utf8')
-        # sender_id_decoded = sender_id_bytes.rstrip(b'\x00').decode('utf8')
-        # # TODO: Instead of converting back to a tuple, like this,
-        # #  we should probably be using a UUID in place of proxy_id over the wire.
-        # sender_id = literal_eval(sender_id_decoded)
-        sender_id = UUID(bytes=sender_id_bytes)
-        sender_token = UUID(bytes=sender_token_bytes)
-        return cls(data_length, method, request_id, sender_id, sender_token, response_expected)
+        return cls(data_length, method, request_id, UUID(bytes=sender_id_bytes), UUID(bytes=sender_token_bytes),
+                   cls.bitflag_is_set(cls.RESPONSE_EXPECTED_BIT, bitflags),
+                   keep_alive=cls.bitflag_is_set(cls.KEEP_ALIVE_BIT, bitflags),
+                   compressed=cls.bitflag_is_set(cls.COMPRESSED_BIT, bitflags),
+                   encrypted=cls.bitflag_is_set(cls.ENCRYPTED_BIT, bitflags),
+                   aes_gcm=cls.bitflag_is_set(cls.AES_GCM_BIT, bitflags))
+
+
+class HeadersV2(HeadersV1):
+    """Version 1 with a 32-bit request id and a 16-byte remote id (all zeros when absent).
+
+    A proxy process serves many remotes, so the sender id alone cannot say which remote a pushed message concerns.
+    The remote id is the identifier the caller gave the proxy when it registered the remote; the receiving connector
+    dispatches on ``(method_name, remote_id)`` and falls back to the method-only callback. The request id is widened
+    from 16 to 32 bits so that a persistent, multiplexed connection cannot wrap it within a session. Version 2 is the
+    default for every message (``ProtocolProxyMessage.protocol_version``); receivers still accept version 1.
+
+    Layout after the 2-byte version word: data_length Q, method_name 32s, request_id I, sender_id 16s,
+    sender_token 16s, bitflags H, remote_id 16s (94 bytes).
+    """
+    FORMAT = 'Q32sI16s16sH16s'
+    HEADER_LENGTH = struct.calcsize(FORMAT)
+    VERSION = 2
+    REQUEST_ID_MAX = 0xFFFFFFFF
+    NO_REMOTE = bytes(16)
+
+    def __init__(self, data_length: int, method_name: str, request_id: int, sender_id, sender_token,
+                 response_expected: bool = False, remote_id: UUID | None = None, **kwargs):
+        super(HeadersV2, self).__init__(data_length, method_name, request_id, sender_id, sender_token,
+                                        response_expected, **kwargs)
+        self.remote_id: UUID | None = remote_id
+
+    def pack(self):
+        self._check_request_id()
+        return struct.pack(f'>H{self.FORMAT}', self.VERSION, self.data_length, self.method_name.encode('utf8'),
+                           self.request_id, self.sender_id.bytes, self.sender_token.bytes, self._bitflags(),
+                           self.remote_id.bytes if self.remote_id else self.NO_REMOTE)
+
+    @classmethod
+    def unpack(cls, header_bytes):
+        (data_length, method_bytes, request_id, sender_id_bytes, sender_token_bytes, bitflags,
+         remote_id_bytes) = struct.unpack('>' + cls.FORMAT, header_bytes)
+        method = method_bytes.rstrip(b'\x00').decode('utf8')
+        remote_id = None if remote_id_bytes == cls.NO_REMOTE else UUID(bytes=remote_id_bytes)
+        return cls(data_length, method, request_id, UUID(bytes=sender_id_bytes), UUID(bytes=sender_token_bytes),
+                   cls.bitflag_is_set(cls.RESPONSE_EXPECTED_BIT, bitflags), remote_id,
+                   keep_alive=cls.bitflag_is_set(cls.KEEP_ALIVE_BIT, bitflags),
+                   compressed=cls.bitflag_is_set(cls.COMPRESSED_BIT, bitflags),
+                   encrypted=cls.bitflag_is_set(cls.ENCRYPTED_BIT, bitflags),
+                   aes_gcm=cls.bitflag_is_set(cls.AES_GCM_BIT, bitflags))
+
+    def __repr__(self):
+        return super(HeadersV2, self).__repr__() + f', remote_id={self.remote_id}, keep_alive={self.keep_alive}, compressed={self.compressed}, encrypted={self.encrypted}, aes_gcm={self.aes_gcm}'
